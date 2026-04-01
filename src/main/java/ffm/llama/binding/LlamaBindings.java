@@ -2,6 +2,9 @@ package ffm.llama.binding;
 
 import java.lang.foreign.*;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.nio.charset.Charset;
 
 /**
  * Complete FFM bindings for llama.cpp with support for:
@@ -14,6 +17,13 @@ import java.lang.invoke.MethodHandle;
  */
 public class LlamaBindings {
 
+    private static final Linker linker = Linker.nativeLinker();
+    private static final SymbolLookup lookup = SymbolLookup.loaderLookup();
+
+    // Static field to prevent GC of the native callback stub
+    private static MemorySegment LOG_STUB;
+    private static volatile boolean loggingEnabled = false;
+
     static {
         // Look for a specific environment variable, fallback to a default name
         String llamaPath = System.getenv("LLAMA_LIB_PATH");
@@ -24,10 +34,9 @@ public class LlamaBindings {
             // Fallback: try to load from the system's standard library paths (LD_LIBRARY_PATH)
             System.loadLibrary("llama");
         }
-    }
 
-    private static final Linker linker = Linker.nativeLinker();
-    private static final SymbolLookup lookup = SymbolLookup.loaderLookup();
+        installLogCallback();
+    }
 
     // ============================================================================
     // STRUCT LAYOUTS - Critical for proper FFM memory management
@@ -598,5 +607,57 @@ public class LlamaBindings {
         } catch (Throwable t) {
             throw new RuntimeException("Failed to free llama backend", t);
         }
+    }
+
+    public static void enableLogging() {
+        loggingEnabled = true;
+    }
+
+    public static void disableLogging() {
+        loggingEnabled = false;
+    }
+
+    private static void installLogCallback() {
+        try {
+            // Use loaderLookup – the library is already loaded
+            SymbolLookup loaderLookup = SymbolLookup.loaderLookup();
+            MemorySegment logSetAddr = loaderLookup.find("llama_log_set")
+                    .orElseThrow(() -> new RuntimeException("llama_log_set not found"));
+
+            MethodHandle logSet = linker.downcallHandle(
+                    logSetAddr,
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+
+            MethodHandle logger = MethodHandles.lookup().findStatic(
+                    LlamaBindings.class,
+                    "logCallback",
+                    MethodType.methodType(void.class, int.class, MemorySegment.class, MemorySegment.class)
+            );
+
+            LOG_STUB = linker.upcallStub(
+                    logger,
+                    FunctionDescriptor.ofVoid(
+                            ValueLayout.JAVA_INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS
+                    ),
+                    Arena.global()
+            );
+
+            // Install the callback (user_data = NULL)
+            logSet.invokeExact(LOG_STUB, MemorySegment.NULL);
+
+        } catch (Throwable t) {
+            System.err.println("[WARN] Failed to install llama logger: " + t);
+            LOG_STUB = null;
+        }
+    }
+
+    private static void logCallback(int level, MemorySegment text, MemorySegment user_data) {
+        if (!loggingEnabled) return;  // muted
+
+        String msg = text == null ? "" : text.getString(0, Charset.defaultCharset());
+        System.err.printf("[llama level %d] %s%n", level, msg);
     }
 }

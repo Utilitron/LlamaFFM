@@ -112,8 +112,6 @@ public class LlamaBatch implements AutoCloseable {
         }
 
         try {
-            System.out.println("tokenPtr size = " + tokenPtr.byteSize());
-
             // Set token
             tokenPtr.setAtIndex(ValueLayout.JAVA_INT, nTokens, tokenId);
 
