@@ -18,17 +18,13 @@ GPU Accelerated: Built-in support for CUDA, ROCm, and Metal backends via the und
 Low-Level Control: Designed for building AI kernels and multi-agent frameworks where VRAM management and inference speed are critical.
 
 
-**Prerequisites:**
-
-JDK 22 or higher: Required for the finalized Foreign Function & Memory API.
-
-llama.cpp Shared Library: You must have the compiled .so (Linux), .dll (Windows), or .dylib (macOS) for your specific architecture.
-
-
 **Technical Stack**
+
 Runtime: JDK 22+ (Required for finalized FFM API)
 
-Native Engine: llama.cpp
+Native Engine: llama.cpp 
+
+Shared Library: You must have the compiled .so (Linux), .dll (Windows), or .dylib (macOS) for your specific architecture.
 
 Validated Build: 8562 (Commit: c46758d28)
 
