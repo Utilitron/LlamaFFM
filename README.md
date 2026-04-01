@@ -19,3 +19,10 @@ Prerequisites:
 JDK 22 or higher: Required for the finalized Foreign Function & Memory API.
 
 llama.cpp Shared Library: You must have the compiled .so (Linux), .dll (Windows), or .dylib (macOS) for your specific architecture.
+
+**Technical Stack**
+Runtime: JDK 22+ (Required for finalized FFM API)
+Native Engine: llama.cpp
+Validated Build: 8562 (Commit: c46758d28)
+Compiler: GCC 13.3.0
+Tested OS: Linux (Ubuntu/Mint) with Vulkan backend
