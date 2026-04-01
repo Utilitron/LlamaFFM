@@ -65,7 +65,7 @@ public class LlamaBindings {
             ValueLayout.JAVA_BYTE.withName("use_extra_bufts"),              // Use extra buffer types (used for weight repacking)
             ValueLayout.JAVA_BYTE.withName("no_host"),                      // Bypass host buffer allowing extra buffers to be used
             ValueLayout.JAVA_BYTE.withName("no_alloc")                      // Only load metadata and simulate memory allocations
-    ).withName("llama_model_params");
+    ).withByteAlignment(8).withName("llama_model_params");
 
     /**
      * Layout for llama_context_params
@@ -120,14 +120,23 @@ public class LlamaBindings {
             ValueLayout.ADDRESS.withName("n_seq_id"),                       // Number of sequence IDs per token
             ValueLayout.ADDRESS.withName("seq_id"),                         // Sequence IDs (llama_seq_id**)
             ValueLayout.ADDRESS.withName("logits")                          // Whether to compute logits (int8_t*)
-    ).withName("llama_batch");
+    ).withByteAlignment(8).withName("llama_batch");
 
     /**
      * Layout for llama_sampler_chain_params
      */
     public static final StructLayout SAMPLER_CHAIN_PARAMS_LAYOUT = MemoryLayout.structLayout(
             ValueLayout.JAVA_BYTE.withName("no_perf")                       // Whether to measure performance
-    ).withName("llama_sampler_chain_params");
+    ).withByteAlignment(1).withName("llama_sampler_chain_params");
+
+    /**
+     * Layout for llama_chat_message
+     * Used to hold the formatted prompt.
+     */
+    public static final StructLayout CHAT_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("role"),
+            ValueLayout.ADDRESS.withName("content")
+    ).withByteAlignment(8).withName("llama_chat_message");
 
     // ============================================================================
     // CORE LIFECYCLE FUNCTIONS
@@ -237,6 +246,11 @@ public class LlamaBindings {
     public static final MethodHandle llama_perf_context_reset;
     public static final MethodHandle llama_perf_sampler_print;
     public static final MethodHandle llama_perf_sampler_reset;
+
+    // ============================================================================
+    // CHAT TEMPLATE
+    // ============================================================================
+    public static final MethodHandle llama_chat_apply_template;
 
     // ============================================================================
     // INITIALIZATION - Bind all native functions
@@ -578,6 +592,20 @@ public class LlamaBindings {
             llama_perf_sampler_reset = linker.downcallHandle(
                     lookup.find("llama_perf_sampler_reset").orElseThrow(),
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+            );
+
+            // Chat Templates
+            llama_chat_apply_template = linker.downcallHandle(
+                    lookup.find("llama_chat_apply_template").orElseThrow(),
+                    FunctionDescriptor.of(
+                            ValueLayout.JAVA_INT,    // Return: length of result
+                            ValueLayout.ADDRESS,     // tmpl (const char *)
+                            ValueLayout.ADDRESS,     // chat (const llama_chat_message *)
+                            ValueLayout.JAVA_LONG,   // n_msg (size_t)
+                            ValueLayout.JAVA_BOOLEAN,// add_ass (bool)
+                            ValueLayout.ADDRESS,     // buf (char *)
+                            ValueLayout.JAVA_INT     // length (int32_t)
+                    )
             );
 
         } catch (Throwable e) {

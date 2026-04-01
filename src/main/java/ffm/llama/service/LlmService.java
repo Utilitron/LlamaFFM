@@ -7,8 +7,11 @@ import ffm.llama.model.LlamaContext;
 import ffm.llama.model.LlamaModel;
 import ffm.llama.sampling.LlamaSampler;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
@@ -17,6 +20,9 @@ import java.util.function.Consumer;
  * High-level LLM service
  */
 public class LlmService implements AutoCloseable {
+
+    // Simple container for the chat message
+    public record ChatMessage(String role, String content) {}
 
     // Initialize llama.cpp backend once
     static {
@@ -122,30 +128,99 @@ public class LlmService implements AutoCloseable {
         }
     }
 
+    public String applyChatTemplate(List<ChatMessage> history, boolean addAssistant) {
+        try (Arena arena = Arena.ofConfined()) {
+            int messageCount = history.size();
+
+            // Allocate an array of llama_chat_message structs (16 bytes each)
+            MemorySegment chatArray = arena.allocate(LlamaBindings.CHAT_LAYOUT, messageCount);
+
+            for (int i = 0; i < messageCount; i++) {
+                ChatMessage msg = history.get(i);
+
+                // Calculate the offset for the i-th struct in the array
+                MemorySegment currentStruct = chatArray.asSlice(i * LlamaBindings.CHAT_LAYOUT.byteSize());
+
+                // Allocate C-strings (null-terminated) for role and content
+                MemorySegment roleSeg = arena.allocateFrom(msg.role());
+                MemorySegment contentSeg = arena.allocateFrom(msg.content());
+
+                // Write the pointers into the struct
+                currentStruct.set(ValueLayout.ADDRESS, 0, roleSeg);  // Offset 0: role
+                currentStruct.set(ValueLayout.ADDRESS, 8, contentSeg); // Offset 8: content
+            }
+
+            // First Pass: Get the required buffer size
+            // Passing NULL (MemorySegment.NULL) for the template string uses the GGUF's internal default.
+            int requiredSize = (int) LlamaBindings.llama_chat_apply_template.invokeExact(
+                    MemorySegment.NULL,
+                    chatArray,
+                    (long) messageCount,
+                    addAssistant,
+                    MemorySegment.NULL,
+                    0
+            );
+
+            if (requiredSize < 0) {
+                throw new RuntimeException("Template application failed with error code: " + requiredSize);
+            }
+
+            // Second Pass: Allocate the buffer and fill it
+            // llama.cpp returns the size including the null terminator
+            MemorySegment buffer = arena.allocate(ValueLayout.JAVA_BYTE, requiredSize);
+
+            int actualSize = (int) LlamaBindings.llama_chat_apply_template.invokeExact(
+                    MemorySegment.NULL,
+                    chatArray,
+                    (long) messageCount,
+                    addAssistant,
+                    buffer,
+                    requiredSize
+            );
+
+            if (actualSize <= 0) {
+                throw new RuntimeException("Template application failed during formatting.");
+            }
+
+            // Use the returned size to grab exactly the bytes we need.
+            // We subtract 1 if the returned size includes the null terminator (standard for llama.cpp)
+            byte[] bytes = buffer.asSlice(0, actualSize).toArray(ValueLayout.JAVA_BYTE);
+
+            // If the last byte is a null terminator, strip it before making the Java String
+            int effectiveLength = (bytes.length > 0 && bytes[bytes.length - 1] == 0)
+                    ? bytes.length - 1
+                    : bytes.length;
+
+            // Convert back to a Java String (FFM handles the UTF-8 conversion)
+            return new String(bytes, 0, effectiveLength, StandardCharsets.UTF_8);
+
+        } catch (Throwable t) {
+            throw new RuntimeException("Failed to apply chat template", t);
+        }
+    }
+
     /**
      * Generate text with greedy sampling
      * 
      * @param modelPath Model identifier
-     * @param prompt Input text
-     * @param maxTokens Maximum tokens to generate
+     * @param conversation The structured chat history (System, User, Assistant roles)
      * @return Generated text
      */
-    public String generate(String modelPath, String prompt, int maxTokens) {
-        return generate(modelPath, prompt, maxTokens, LlamaSampler.SamplerConfig.greedy());
+    public String generate(String modelPath, List<ChatMessage> conversation) {
+        return generate(modelPath, conversation, LlamaSampler.SamplerConfig.greedy());
     }
 
     /**
      * Generate text with custom sampling configuration
      * 
      * @param modelPath Model identifier
-     * @param prompt Input text
-     * @param maxTokens Maximum tokens to generate
+     * @param conversation The structured chat history (System, User, Assistant roles)
      * @param samplerConfig Sampling strategy
      * @return Generated text
      */
-    public String generate(String modelPath, String prompt, int maxTokens, LlamaSampler.SamplerConfig samplerConfig) {
+    public String generate(String modelPath, List<ChatMessage> conversation, LlamaSampler.SamplerConfig samplerConfig) {
         StringBuilder result = new StringBuilder();
-        generateStreaming(modelPath, prompt, maxTokens, samplerConfig, result::append);
+        generateStreaming(modelPath, conversation, samplerConfig, result::append);
         return result.toString();
     }
 
@@ -154,15 +229,13 @@ public class LlmService implements AutoCloseable {
      * Calls the callback for each generated token
      * 
      * @param modelPath Model identifier
-     * @param prompt Input text
-     * @param maxTokens Maximum tokens to generate
+     * @param conversation The structured chat history (System, User, Assistant roles)
      * @param samplerConfig Sampling strategy
      * @param callback Function called with each generated token
      */
     public void generateStreaming(
             String modelPath,
-            String prompt,
-            int maxTokens,
+            List<ChatMessage> conversation,
             LlamaSampler.SamplerConfig samplerConfig,
             Consumer<String> callback
     ) {
@@ -175,14 +248,19 @@ public class LlmService implements AutoCloseable {
         LlamaModel model = instance.model;
         LlamaContext ctx = instance.context;
 
+        String formattedPrompt = applyChatTemplate(conversation, true);
+
         try (LlamaSampler sampler = new LlamaSampler(samplerConfig)) {
             
             // Clear KV cache for fresh generation
             ctx.clearKvCache();
 
             // Tokenize prompt
-            int[] promptTokens = model.tokenize(prompt, true, true);
-            
+            int[] promptTokens = model.tokenize(formattedPrompt, true, true);
+
+            // Calculate how many slots are left in your context window
+            int maxPossibleTokens = Math.max(1, ctx.getModelConfig().getContextSize() - promptTokens.length);
+
             // Prefill phase - process prompt in parallel
             try (LlamaBatch batch = LlamaBatch.forTokens(promptTokens, 0, 0, true)) {
                 int ret = ctx.decode(batch);
@@ -195,7 +273,7 @@ public class LlmService implements AutoCloseable {
             int nCur = promptTokens.length;
             int nDecoded = 0;
 
-            while (nDecoded < maxTokens) {
+            while (nDecoded < maxPossibleTokens) {
                 // Sample next token
                 int nextToken = sampler.sample(ctx, -1);
 
@@ -219,6 +297,8 @@ public class LlmService implements AutoCloseable {
                 nCur++;
                 nDecoded++;
             }
+
+            if (nDecoded >= maxPossibleTokens) throw new IllegalStateException("Ran out of tokens");
 
         } catch (Exception e) {
             throw new RuntimeException("Generation failed for model: " + modelPath, e);
