@@ -102,7 +102,7 @@ public class LlamaContext implements AutoCloseable {
                     MemoryLayout.PathElement.groupElement("n_threads_batch"));
             nThreadsBatchHandle.set(contextParams, 0L, modelConfig.getCpuThreads());
 
-            // KV cache offloading (BYTE)
+            // KV cache offloading
             VarHandle offloadKqvHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
                     MemoryLayout.PathElement.groupElement("offload_kqv"));
             offloadKqvHandle.set(contextParams, 0L, (byte) (modelConfig.isOffloadKvToGpu() ? 1 : 0));
@@ -117,10 +117,15 @@ public class LlamaContext implements AutoCloseable {
                     MemoryLayout.PathElement.groupElement("defrag_thold"));
             defragHandle.set(contextParams, 0L, modelConfig.getDefragThreshold());
 
-            // Performance metrics (BYTE!)
+            // Performance metrics
             VarHandle noPerfHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
                     MemoryLayout.PathElement.groupElement("no_perf"));
             noPerfHandle.set(contextParams, 0L, (byte) 0);
+
+            // Embeddings
+            VarHandle embeddingsHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
+                    MemoryLayout.PathElement.groupElement("embeddings"));
+            embeddingsHandle.set(contextParams, 0L, (byte) (modelConfig.isEmbeddings() ? 1 : 0));
 
         } catch (Throwable t) {
             throw new RuntimeException("Failed to apply model config to context params", t);
@@ -165,7 +170,7 @@ public class LlamaContext implements AutoCloseable {
             MemorySegment memHandle = (MemorySegment) LlamaBindings.llama_get_memory.invoke(this.ctx);
 
             if (memHandle.equals(MemorySegment.NULL)) {
-                throw new RuntimeException("Context returned a NULL memory handle.");
+                return;
             }
 
             // 'false' resets metadata (standard reset)
@@ -379,6 +384,17 @@ public class LlamaContext implements AutoCloseable {
     public MemorySegment getEmbeddings() {
         try {
             return (MemorySegment) LlamaBindings.llama_get_embeddings.invoke(ctx);
+        } catch (Throwable t) {
+            throw new RuntimeException("Failed to get embeddings", t);
+        }
+    }
+
+    /**
+     * Get embeddings (when context is in embedding mode)
+     */
+    public MemorySegment getEmbeddingsIth(int[] tokens) {
+        try {
+            return (MemorySegment) LlamaBindings.llama_get_embeddings_ith.invoke(ctx, tokens.length - 1);
         } catch (Throwable t) {
             throw new RuntimeException("Failed to get embeddings", t);
         }

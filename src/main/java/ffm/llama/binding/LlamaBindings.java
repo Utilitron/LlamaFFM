@@ -195,6 +195,7 @@ public class LlamaBindings {
     public static final MethodHandle llama_get_embeddings;
     public static final MethodHandle llama_get_embeddings_ith;
     public static final MethodHandle llama_get_embeddings_seq;
+    public static final MethodHandle llama_pooling_type;
 
     // ============================================================================
     // SAMPLING - Token generation
@@ -427,6 +428,11 @@ public class LlamaBindings {
             llama_get_embeddings_seq = linker.downcallHandle(
                     lookup.find("llama_get_embeddings_seq").orElseThrow(),
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
+            );
+
+            llama_pooling_type = linker.downcallHandle(
+                    lookup.find("llama_pooling_type").orElseThrow(),
+                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
             );
 
             // Sampling

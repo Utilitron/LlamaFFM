@@ -1,6 +1,7 @@
 package ffm.llama.service;
 
 import ffm.llama.binding.LlamaBindings;
+import ffm.llama.binding.LlamaPoolingType;
 import ffm.llama.config.ModelConfig;
 import ffm.llama.model.LlamaBatch;
 import ffm.llama.model.LlamaContext;
@@ -10,7 +11,6 @@ import ffm.llama.sampling.LlamaSampler;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
@@ -84,7 +84,7 @@ public class LlmService implements AutoCloseable {
         try {
             // Load model
             LlamaModel model = new LlamaModel(modelPath, modelConfig);
-            
+
             // default config if not provided
             ModelConfig finalConfig = modelConfig;
             if (finalConfig == null) {
@@ -251,7 +251,7 @@ public class LlmService implements AutoCloseable {
         String formattedPrompt = applyChatTemplate(conversation, true);
 
         try (LlamaSampler sampler = new LlamaSampler(samplerConfig)) {
-            
+
             // Clear KV cache for fresh generation
             ctx.clearKvCache();
 
@@ -308,6 +308,7 @@ public class LlmService implements AutoCloseable {
     /**
      * Generate embeddings for text
      * Requires model loaded with embeddings=true in context params
+     * Automatically detects pooling type and uses appropriate strategy
      * 
      * @param modelPath Model identifier (should be embedding model like nomic-embed)
      * @param text Text to embed
@@ -319,40 +320,67 @@ public class LlmService implements AutoCloseable {
             throw new IllegalArgumentException("Model not loaded: " + modelPath);
         }
 
+        // Validate that model is configured for embeddings
+        if (!instance.modelConfig.isEmbeddings()) {
+            throw new IllegalStateException("Model not configured for embeddings.");
+        }
+
         instance.updateLastUsed();
         LlamaModel model = instance.model;
         LlamaContext ctx = instance.context;
 
         try {
-            // Tokenize text
+            // Get the embedding size
+            int n_embd = (int) LlamaBindings.llama_model_n_embd.invokeExact(model.ptr());
+
+            // Get pooling type to determine strategy
+            int poolingType = (int) LlamaBindings.llama_pooling_type.invokeExact(ctx.ptr());
+            boolean isNone = poolingType == LlamaPoolingType.NONE.getValue();
+
             int[] tokens = model.tokenize(text, true, false);
 
-            // Process batch
-            try (LlamaBatch batch = LlamaBatch.forTokens(tokens, 0, 0, false)) {
+            // Clear KV cache for fresh generation
+            ctx.clearKvCache();
+
+            // Process batch - enable logits for last token
+            try (LlamaBatch batch = LlamaBatch.forTokens(tokens, 0, 0, !isNone)) {
                 int ret = ctx.decode(batch);
                 if (ret != 0) {
-                    throw new RuntimeException("Failed to process batch for embeddings");
+                    throw new RuntimeException("Failed to decode batch (error code: " + ret + ")");
                 }
             }
 
-            // Get embeddings
-            var embeddingsSeg = ctx.getEmbeddings();
-            if (embeddingsSeg == null || embeddingsSeg == MemorySegment.NULL) {
-                throw new RuntimeException("No embeddings returned (ensure model is in embedding mode)");
+            // Retrieve computed embeddings
+            if (poolingType == LlamaPoolingType.NONE.getValue()) {
+                // Access the full token-level embedding buffer
+                MemorySegment allEmbeds = (MemorySegment) LlamaBindings.llama_get_embeddings.invokeExact(ctx.ptr());
+                // Offset to the last token: (tokens.length - 1) * n_embd * sizeof(float)
+                long offset = (long) (tokens.length - 1) * n_embd * Float.BYTES;
+                return copyEmbedding(allEmbeds.asSlice(offset), n_embd);
+            } else {
+                // Access the pooled sequence-level embedding buffer
+                MemorySegment seqEmbed = (MemorySegment) LlamaBindings.llama_get_embeddings_seq.invokeExact(ctx.ptr(), 0);
+                if (seqEmbed.address() == 0L) {
+                    throw new RuntimeException("Model pooling failed to produce a sequence embedding.");
+                }
+                return copyEmbedding(seqEmbed, n_embd);
             }
 
-            // Copy to Java array
-            int embdSize = model.getEmbeddingSize();
-            float[] embeddings = new float[embdSize];
-            for (int i = 0; i < embdSize; i++) {
-                embeddings[i] = embeddingsSeg.getAtIndex(ValueLayout.JAVA_FLOAT, i);
-            }
-
-            return embeddings;
-
-        } catch (Exception e) {
+        } catch (Throwable e) {
             throw new RuntimeException("Embedding generation failed", e);
         }
+    }
+
+    /**
+     * Copy embedding from memory segment to float array
+     */
+    private float[] copyEmbedding(MemorySegment embSeg, int n_embd) {
+        MemorySegment safe = embSeg.reinterpret((long) n_embd * Float.BYTES);
+        float[] result = new float[n_embd];
+        for (int i = 0; i < n_embd; i++) {
+            result[i] = safe.getAtIndex(ValueLayout.JAVA_FLOAT, i);
+        }
+        return result;
     }
 
     /**

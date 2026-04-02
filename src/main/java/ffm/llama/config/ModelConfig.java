@@ -36,6 +36,9 @@ public class ModelConfig {
     /** Enable flash attention (reduces memory, increases compute) */
     private final boolean flashAttention;
 
+    /** Enable embeddings */
+    private final boolean embeddings;
+
     // ============================================================================
     // CONSTRUCTORS
     // ============================================================================
@@ -50,6 +53,7 @@ public class ModelConfig {
         this.cpuThreads = builder.cpuThreads;
         this.defragThreshold = builder.defragThreshold;
         this.flashAttention = builder.flashAttention;
+        this.embeddings = builder.embeddings;
     }
 
     // ============================================================================
@@ -65,7 +69,8 @@ public class ModelConfig {
         private int batchSize = 512;
         private int cpuThreads = 4;
         private float defragThreshold = 0.1f;
-         private boolean flashAttention = false;
+        private boolean flashAttention = false;
+        private boolean embeddings = false;
 
         public static Builder create() {
             return new Builder();
@@ -116,6 +121,11 @@ public class ModelConfig {
             return this;
         }
 
+        public Builder embeddings(boolean embeddings) {
+            this.embeddings = embeddings;
+            return this;
+        }
+
         public ModelConfig build() {
             return new ModelConfig(this);
         }
@@ -161,6 +171,8 @@ public class ModelConfig {
         return flashAttention;
     }
 
+    public boolean isEmbeddings() { return embeddings; }
+
     // ============================================================================
     // UTILITIES
     // ============================================================================
@@ -179,9 +191,8 @@ public class ModelConfig {
     @Override
     public String toString() {
         return String.format(
-                "TierConfig[gpu_layers=%d, kv_gpu=%b, ctx=%d, batch=%d, threads=%d, defrag=%.2f, flash=%b]",
-                gpuLayers, offloadKvToGpu, contextSize, batchSize,
-                cpuThreads, defragThreshold, flashAttention
+                "TierConfig[gpu_layers=%d, kv_gpu=%b, ctx=%d, batch=%d, threads=%d, defrag=%.2f, flash=%b, embeddings=%b]",
+                gpuLayers, offloadKvToGpu, contextSize, batchSize, cpuThreads, defragThreshold, flashAttention, embeddings
         );
     }
 }
