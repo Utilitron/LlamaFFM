@@ -5,6 +5,7 @@ import ffm.llama.config.ModelConfig;
 
 import java.lang.foreign.*;
 import java.lang.invoke.VarHandle;
+import java.nio.file.Paths;
 
 /**
  * Represents a llama.cpp inference context with model configuration.
@@ -465,7 +466,6 @@ public class LlamaContext implements AutoCloseable {
         System.out.println("=".repeat(60));
         System.out.println("Context Information");
         System.out.println("=".repeat(60));
-        System.out.println("Model:            " + model.getPath());
         System.out.println("Context Size:     " + modelConfig.getContextSize());
         System.out.println("Batch Size:       " + modelConfig.getBatchSize());
         System.out.println("CPU Threads:      " + modelConfig.getCpuThreads());
@@ -475,6 +475,7 @@ public class LlamaContext implements AutoCloseable {
         //System.out.println("Max Seq Pos:     " + getMaxSequencePosition(0));
         //System.out.println("Est. KV Cache:   " + String.format("%.2f GB", estimateKvCacheUsageGB()));
         System.out.println("=".repeat(60));
+        System.out.println("\n\n");
     }
 
     @Override

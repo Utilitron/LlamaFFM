@@ -211,6 +211,7 @@ public class LlamaBindings {
     public static final MethodHandle llama_sampler_init_temp;
     public static final MethodHandle llama_sampler_sample;
     public static final MethodHandle llama_sampler_free;
+    public static final MethodHandle llama_sampler_init_grammar;
 
     // ============================================================================
     // KV CACHE MANAGEMENT
@@ -251,6 +252,7 @@ public class LlamaBindings {
     // ============================================================================
     // CHAT TEMPLATE
     // ============================================================================
+    public static final MethodHandle llama_model_chat_template;
     public static final MethodHandle llama_chat_apply_template;
 
     // ============================================================================
@@ -405,7 +407,7 @@ public class LlamaBindings {
                     FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, BATCH_LAYOUT)
             );
 
-           llama_get_logits = linker.downcallHandle(
+            llama_get_logits = linker.downcallHandle(
                     lookup.find("llama_get_logits").orElseThrow(),
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
@@ -600,7 +602,18 @@ public class LlamaBindings {
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
             );
 
+            // Grammar Sampler
+            llama_sampler_init_grammar = linker.downcallHandle(
+                    lookup.find("llama_sampler_init_grammar").orElseThrow(),
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+
             // Chat Templates
+            llama_model_chat_template = linker.downcallHandle(
+                    lookup.find("llama_model_chat_template").orElseThrow(),
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+
             llama_chat_apply_template = linker.downcallHandle(
                     lookup.find("llama_chat_apply_template").orElseThrow(),
                     FunctionDescriptor.of(

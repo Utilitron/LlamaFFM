@@ -2,6 +2,7 @@ package ffm.llama.sampling;
 
 import ffm.llama.binding.LlamaBindings;
 import ffm.llama.model.LlamaContext;
+import ffm.llama.model.LlamaModel;
 
 import java.lang.foreign.*;
 
@@ -11,21 +12,30 @@ import java.lang.foreign.*;
  */
 public class LlamaSampler implements AutoCloseable {
 
+    public record LlamaGrammar(String gbnf, String rootRule) {
+        public static LlamaGrammar of(String gbnf) {
+            return new LlamaGrammar(gbnf, "root");
+        }
+    }
+
     private final MemorySegment samplerChain;
     private final Arena samplerArena;
+
+    private final MemorySegment vocabPtr;
 
     /**
      * Create a sampler with default greedy strategy
      */
     public LlamaSampler() {
-        this(SamplerConfig.greedy());
+        this(SamplerConfig.greedy(), null);
     }
 
     /**
      * Create a sampler with custom configuration
      */
-    public LlamaSampler(SamplerConfig config) {
+    public LlamaSampler(SamplerConfig config, MemorySegment vocabPtr) {
         this.samplerArena = Arena.ofShared();
+        this.vocabPtr = vocabPtr;
 
         try {
             // Get default sampler chain params
@@ -78,6 +88,19 @@ public class LlamaSampler implements AutoCloseable {
         if (config.minP > 0.0f) {
             MemorySegment minPSampler = (MemorySegment) LlamaBindings.llama_sampler_init_min_p.invoke(config.minP, 1L);
             LlamaBindings.llama_sampler_chain_add.invoke(samplerChain, minPSampler);
+        }
+
+// Apply Grammar Constraint
+        if (config.grammar != null) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment root = arena.allocateFrom("root");
+                MemorySegment gbnf = arena.allocateFrom(config.grammar.gbnf());
+
+                // Initialize the grammar sampler
+                MemorySegment gSampler = (MemorySegment) LlamaBindings.llama_sampler_init_grammar.invoke(vocabPtr, gbnf, root);
+
+                LlamaBindings.llama_sampler_chain_add.invoke(samplerChain, gSampler);
+            }
         }
 
         // Final sampler - greedy or random
@@ -146,14 +169,16 @@ public class LlamaSampler implements AutoCloseable {
         public final int topK;
         public final float topP;
         public final float minP;
+        public final LlamaGrammar grammar;
         public final boolean greedy;
         public final int seed;
 
-        public SamplerConfig(float temperature, int topK, float topP, float minP, boolean greedy, int seed) {
+        public SamplerConfig(float temperature, int topK, float topP, float minP, LlamaGrammar grammar, boolean greedy, int seed) {
             this.temperature = temperature;
             this.topK = topK;
             this.topP = topP;
             this.minP = minP;
+            this.grammar = grammar;
             this.greedy = greedy;
             this.seed = seed;
         }
@@ -163,7 +188,7 @@ public class LlamaSampler implements AutoCloseable {
          * Best for deterministic, focused output
          */
         public static SamplerConfig greedy() {
-            return new SamplerConfig(1.0f, 0, 1.0f, 0.0f, true, 0);
+            return new SamplerConfig(1.0f, 0, 1.0f, 0.0f, null, true, 0);
         }
 
         /**
@@ -171,7 +196,7 @@ public class LlamaSampler implements AutoCloseable {
          * Temperature 0.7, top-p 0.9
          */
         public static SamplerConfig balanced() {
-            return new SamplerConfig(0.7f, 40, 0.9f, 0.05f, false, (int) System.currentTimeMillis());
+            return new SamplerConfig(0.7f, 40, 0.9f, 0.05f, null, false, (int) System.currentTimeMillis());
         }
 
         /**
@@ -179,7 +204,7 @@ public class LlamaSampler implements AutoCloseable {
          * Temperature 0.9, top-p 0.95
          */
         public static SamplerConfig creative() {
-            return new SamplerConfig(0.9f, 0, 0.95f, 0.05f, false, (int) System.currentTimeMillis());
+            return new SamplerConfig(0.9f, 0, 0.95f, 0.05f, null, false, (int) System.currentTimeMillis());
         }
 
         /**
@@ -187,7 +212,7 @@ public class LlamaSampler implements AutoCloseable {
          * Temperature 0.3, top-k 10
          */
         public static SamplerConfig precise() {
-            return new SamplerConfig(0.3f, 10, 0.9f, 0.0f, false, (int) System.currentTimeMillis());
+            return new SamplerConfig(0.3f, 10, 0.9f, 0.0f, null, false, (int) System.currentTimeMillis());
         }
 
         /**
@@ -203,6 +228,7 @@ public class LlamaSampler implements AutoCloseable {
             private float topP = 0.9f;
             private float minP = 0.05f;
             private boolean greedy = false;
+            private LlamaGrammar grammar = null;
             private int seed = (int) System.currentTimeMillis();
 
             public Builder temperature(float temperature) {
@@ -225,6 +251,11 @@ public class LlamaSampler implements AutoCloseable {
                 return this;
             }
 
+            public Builder grammar(LlamaGrammar grammar) {
+                this.grammar = grammar;
+                return this;
+            }
+
             public Builder greedy(boolean greedy) {
                 this.greedy = greedy;
                 return this;
@@ -236,7 +267,7 @@ public class LlamaSampler implements AutoCloseable {
             }
 
             public SamplerConfig build() {
-                return new SamplerConfig(temperature, topK, topP, minP, greedy, seed);
+                return new SamplerConfig(temperature, topK, topP, minP, grammar, greedy, seed);
             }
         }
 

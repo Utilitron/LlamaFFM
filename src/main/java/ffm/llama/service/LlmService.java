@@ -7,11 +7,14 @@ import ffm.llama.model.LlamaBatch;
 import ffm.llama.model.LlamaContext;
 import ffm.llama.model.LlamaModel;
 import ffm.llama.sampling.LlamaSampler;
+import ffm.llama.utils.TemplateDetector;
+import ffm.llama.utils.LlmToolGrammar;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
@@ -21,8 +24,42 @@ import java.util.function.Consumer;
  */
 public class LlmService implements AutoCloseable {
 
+    //Interface for all messages passed to the LlmService
+    public interface LlmMessage {
+        String role();
+        String content();
+    }
+
+    //Interface for all messages passed to the LlmService with tools
+    public interface LlmMessageWithTools extends LlmMessage {
+        String toolDefinitions();
+    }
+
+    //Interface for all messages passed to the LlmService with tools
+    public interface LlmToolMessage extends LlmMessage {
+        String toolCallId();
+        String toolName();
+    }
+
     // Simple container for the chat message
-    public record ChatMessage(String role, String content) {}
+    public record ChatMessage(
+            String role,
+            String content
+    ) implements LlmMessage {}
+
+    // Simple container for the chat message
+    public record ChatMessageWithTools(
+            String role,
+            String content,
+            String toolDefinitions
+    ) implements LlmMessageWithTools {}
+
+    public record ToolMessage(
+            String role,
+            String toolCallId,
+            String toolName,
+            String content
+    ) implements LlmToolMessage {}
 
     // Initialize llama.cpp backend once
     static {
@@ -76,9 +113,10 @@ public class LlmService implements AutoCloseable {
      * @return Model identifier for subsequent calls
      */
     public String loadModel(String modelPath, ModelConfig modelConfig) {
+        String modelName = Paths.get(modelPath).getFileName().toString();
         // Check if already loaded
-        if (loadedModels.containsKey(modelPath)) {
-            return modelPath;
+        if (loadedModels.containsKey(modelName)) {
+            return modelName;
         }
 
         try {
@@ -104,16 +142,16 @@ public class LlmService implements AutoCloseable {
 
             // Register instance
             ModelInstance instance = new ModelInstance(model, context, finalConfig);
-            loadedModels.put(modelPath, instance);
+            loadedModels.put(modelName, instance);
 
-            System.out.println("Loaded model: " + modelPath);
+            System.out.println("Loaded model: " + modelName);
             model.printInfo();
             context.printInfo();
 
-            return modelPath;
+            return modelName;
 
         } catch (Exception e) {
-            throw new RuntimeException("Failed to load model: " + modelPath, e);
+            throw new RuntimeException("Failed to load model: " + modelName, e);
         }
     }
 
@@ -121,77 +159,93 @@ public class LlmService implements AutoCloseable {
      * Unload a model to free VRAM
      */
     public void unloadModel(String modelPath) {
-        ModelInstance instance = loadedModels.remove(modelPath);
+        String modelName = Paths.get(modelPath).getFileName().toString();
+        ModelInstance instance = loadedModels.remove(modelName);
         if (instance != null) {
             instance.close();
-            System.out.println("Unloaded model: " + modelPath);
+            System.out.println("Unloaded model: " + modelName);
         }
     }
 
-    public String applyChatTemplate(List<ChatMessage> history, boolean addAssistant) {
+    /**
+     * Apply a chat template (Jinja2) to a list of messages.
+     * If a template string is provided, it is used; otherwise the model's default template is used.
+     * If any message is an instance of LlmMessageWithTools, its tool definitions are injected
+     * into the system message (or a new system message is created) before applying the template.
+     *
+     * @param template The Jinja2 template string (may be null to use the model's default)
+     * @param history The list of messages
+     * @param addAssistant Whether to add an assistant generation prompt at the end
+     * @return The formatted prompt string
+     */
+    public String applyChatTemplate(String template, List<? extends LlmMessage> history, boolean addAssistant) {
         try (Arena arena = Arena.ofConfined()) {
-            int messageCount = history.size();
+            String toolDefinitions = null;
+            List<LlmMessage> bakedHistory = new ArrayList<>();
 
-            // Allocate an array of llama_chat_message structs (16 bytes each)
-            MemorySegment chatArray = arena.allocate(LlamaBindings.CHAT_LAYOUT, messageCount);
+            // Extract tool definitions from any LlmMessageWithTools and collect plain messages
+            for (LlmMessage msg : history) {
+                if (msg instanceof LlmMessageWithTools toolMsg) {
+                    if (toolDefinitions == null) {
+                        toolDefinitions = LlmToolGrammar.injectTools(TemplateDetector.detectTemplate(template), toolMsg.toolDefinitions());
+                    }
+                    bakedHistory.add(new ChatMessage(msg.role(), msg.content()));
+                } else if (msg instanceof ToolMessage toolMsg) {
+                    bakedHistory.add(toolMsg);
+                } else {
+                    bakedHistory.add(msg);
+                }
+            }
 
-            for (int i = 0; i < messageCount; i++) {
-                ChatMessage msg = history.get(i);
+            // Inject tool definitions into the system message (or create one)
+            if (toolDefinitions != null && !toolDefinitions.isEmpty()) {
+                boolean injected = false;
 
-                // Calculate the offset for the i-th struct in the array
+                for (int i = 0; i < bakedHistory.size(); i++) {
+                    LlmMessage msg = bakedHistory.get(i);
+
+                    if ("system".equals(msg.role())) {
+                        bakedHistory.set(i, new ChatMessage("system", msg.content() + " " + toolDefinitions));
+                        injected = true;
+                        break;
+                    }
+                }
+
+                if (!injected) bakedHistory.add(0, new ChatMessage("system", toolDefinitions));
+            }
+
+            int nativeCount = bakedHistory.size();
+            MemorySegment chatArray = arena.allocate(LlamaBindings.CHAT_LAYOUT, nativeCount);
+
+            // Allocate it as a C-string. If null, we fall back to NULL for the internal default.
+            MemorySegment templateSeg = (template != null) ? arena.allocateFrom(template) : MemorySegment.NULL;
+
+            for (int i = 0; i < nativeCount; i++) {
+                LlmMessage msg = bakedHistory.get(i);
                 MemorySegment currentStruct = chatArray.asSlice(i * LlamaBindings.CHAT_LAYOUT.byteSize());
 
-                // Allocate C-strings (null-terminated) for role and content
-                MemorySegment roleSeg = arena.allocateFrom(msg.role());
-                MemorySegment contentSeg = arena.allocateFrom(msg.content());
-
-                // Write the pointers into the struct
-                currentStruct.set(ValueLayout.ADDRESS, 0, roleSeg);  // Offset 0: role
-                currentStruct.set(ValueLayout.ADDRESS, 8, contentSeg); // Offset 8: content
+                currentStruct.set(ValueLayout.ADDRESS, 0, arena.allocateFrom(msg.role()));
+                currentStruct.set(ValueLayout.ADDRESS, 8, arena.allocateFrom(msg.content()));
             }
 
             // First Pass: Get the required buffer size
-            // Passing NULL (MemorySegment.NULL) for the template string uses the GGUF's internal default.
             int requiredSize = (int) LlamaBindings.llama_chat_apply_template.invokeExact(
-                    MemorySegment.NULL,
-                    chatArray,
-                    (long) messageCount,
-                    addAssistant,
-                    MemorySegment.NULL,
-                    0
+                    templateSeg, chatArray, (long) nativeCount, addAssistant, MemorySegment.NULL, 0
             );
-
-            if (requiredSize < 0) {
-                throw new RuntimeException("Template application failed with error code: " + requiredSize);
-            }
+            if (requiredSize < 0) throw new RuntimeException("Template application failed with error code: " + requiredSize);
 
             // Second Pass: Allocate the buffer and fill it
-            // llama.cpp returns the size including the null terminator
             MemorySegment buffer = arena.allocate(ValueLayout.JAVA_BYTE, requiredSize);
 
             int actualSize = (int) LlamaBindings.llama_chat_apply_template.invokeExact(
-                    MemorySegment.NULL,
-                    chatArray,
-                    (long) messageCount,
-                    addAssistant,
-                    buffer,
-                    requiredSize
+                    templateSeg, chatArray, (long) nativeCount, addAssistant, buffer, requiredSize
             );
 
-            if (actualSize <= 0) {
-                throw new RuntimeException("Template application failed during formatting.");
-            }
+            if (actualSize <= 0) throw new RuntimeException("Template application failed during formatting.");
 
-            // Use the returned size to grab exactly the bytes we need.
-            // We subtract 1 if the returned size includes the null terminator (standard for llama.cpp)
             byte[] bytes = buffer.asSlice(0, actualSize).toArray(ValueLayout.JAVA_BYTE);
+            int effectiveLength = (bytes.length > 0 && bytes[bytes.length - 1] == 0) ? bytes.length - 1 : bytes.length;
 
-            // If the last byte is a null terminator, strip it before making the Java String
-            int effectiveLength = (bytes.length > 0 && bytes[bytes.length - 1] == 0)
-                    ? bytes.length - 1
-                    : bytes.length;
-
-            // Convert back to a Java String (FFM handles the UTF-8 conversion)
             return new String(bytes, 0, effectiveLength, StandardCharsets.UTF_8);
 
         } catch (Throwable t) {
@@ -202,25 +256,25 @@ public class LlmService implements AutoCloseable {
     /**
      * Generate text with greedy sampling
      * 
-     * @param modelPath Model identifier
+     * @param modelName Model identifier
      * @param conversation The structured chat history (System, User, Assistant roles)
      * @return Generated text
      */
-    public String generate(String modelPath, List<ChatMessage> conversation) {
-        return generate(modelPath, conversation, LlamaSampler.SamplerConfig.greedy());
+    public String generate(String modelName, List<? extends LlmMessage> conversation) {
+        return generate(modelName, conversation, LlamaSampler.SamplerConfig.greedy());
     }
 
     /**
      * Generate text with custom sampling configuration
      * 
-     * @param modelPath Model identifier
+     * @param modelName Model identifier
      * @param conversation The structured chat history (System, User, Assistant roles)
      * @param samplerConfig Sampling strategy
      * @return Generated text
      */
-    public String generate(String modelPath, List<ChatMessage> conversation, LlamaSampler.SamplerConfig samplerConfig) {
+    public String generate(String modelName, List<? extends LlmMessage> conversation, LlamaSampler.SamplerConfig samplerConfig) {
         StringBuilder result = new StringBuilder();
-        generateStreaming(modelPath, conversation, samplerConfig, result::append);
+        generateStreaming(modelName, conversation, samplerConfig, result::append);
         return result.toString();
     }
 
@@ -228,29 +282,29 @@ public class LlmService implements AutoCloseable {
      * Generate text with streaming callback
      * Calls the callback for each generated token
      * 
-     * @param modelPath Model identifier
+     * @param modelName Model identifier
      * @param conversation The structured chat history (System, User, Assistant roles)
      * @param samplerConfig Sampling strategy
      * @param callback Function called with each generated token
      */
     public void generateStreaming(
-            String modelPath,
-            List<ChatMessage> conversation,
+            String modelName,
+            List<? extends LlmMessage> conversation,
             LlamaSampler.SamplerConfig samplerConfig,
             Consumer<String> callback
     ) {
-        ModelInstance instance = loadedModels.get(modelPath);
+        ModelInstance instance = loadedModels.get(modelName);
         if (instance == null) {
-            throw new IllegalArgumentException("Model not loaded: " + modelPath);
+            throw new IllegalArgumentException("Model not loaded: " + modelName);
         }
 
         instance.updateLastUsed();
         LlamaModel model = instance.model;
         LlamaContext ctx = instance.context;
 
-        String formattedPrompt = applyChatTemplate(conversation, true);
+        String formattedPrompt = applyChatTemplate(model.getChatTemplate(), conversation, true);
 
-        try (LlamaSampler sampler = new LlamaSampler(samplerConfig)) {
+        try (LlamaSampler sampler = new LlamaSampler(samplerConfig, model.vocabPtr())) {
 
             // Clear KV cache for fresh generation
             ctx.clearKvCache();
@@ -301,7 +355,7 @@ public class LlmService implements AutoCloseable {
             if (nDecoded >= maxPossibleTokens) throw new IllegalStateException("Ran out of tokens");
 
         } catch (Exception e) {
-            throw new RuntimeException("Generation failed for model: " + modelPath, e);
+            throw new RuntimeException("Generation failed for model: " + modelName, e);
         }
     }
 
@@ -310,14 +364,14 @@ public class LlmService implements AutoCloseable {
      * Requires model loaded with embeddings=true in context params
      * Automatically detects pooling type and uses appropriate strategy
      * 
-     * @param modelPath Model identifier (should be embedding model like nomic-embed)
+     * @param modelName Model identifier (should be embedding model like nomic-embed)
      * @param text Text to embed
      * @return Embedding vector as float array
      */
-    public float[] embed(String modelPath, String text) {
-        ModelInstance instance = loadedModels.get(modelPath);
+    public float[] embed(String modelName, String text) {
+        ModelInstance instance = loadedModels.get(modelName);
         if (instance == null) {
-            throw new IllegalArgumentException("Model not loaded: " + modelPath);
+            throw new IllegalArgumentException("Model not loaded: " + modelName);
         }
 
         // Validate that model is configured for embeddings
@@ -386,15 +440,16 @@ public class LlmService implements AutoCloseable {
     /**
      * Get information about a loaded model
      */
-    public ModelInfo getModelInfo(String modelPath) {
-        ModelInstance instance = loadedModels.get(modelPath);
+    public ModelInfo getModelInfo(String modelName) {
+        ModelInstance instance = loadedModels.get(modelName);
         if (instance == null) {
             return null;
         }
 
         LlamaModel model = instance.model;
         return new ModelInfo(
-                modelPath,
+                modelName,
+                TemplateDetector.getTemplateName(model.getChatTemplate()),
                 model.getParameterCount(),
                 model.getModelSizeGB(),
                 instance.modelConfig,
@@ -407,7 +462,7 @@ public class LlmService implements AutoCloseable {
      */
     public List<ModelInfo> getLoadedModels() {
         return loadedModels.values().stream()
-                .map(inst -> getModelInfo(inst.model.getPath()))
+                .map(inst -> getModelInfo(Paths.get(inst.model.getPath()).getFileName().toString()))
                 .toList();
     }
 
@@ -461,7 +516,8 @@ public class LlmService implements AutoCloseable {
      * Model information record
      */
     public record ModelInfo(
-            String path,
+            String fileName,
+            String templateName,
             long paramCount,
             double sizeGB,
             ModelConfig modelConfig,
