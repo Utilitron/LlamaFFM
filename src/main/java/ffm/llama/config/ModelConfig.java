@@ -191,7 +191,7 @@ public class ModelConfig {
     @Override
     public String toString() {
         return String.format(
-                "TierConfig[gpu_layers=%d, kv_gpu=%b, ctx=%d, batch=%d, threads=%d, defrag=%.2f, flash=%b, embeddings=%b]",
+                "ModelConfig[gpu_layers=%d, kv_gpu=%b, ctx=%d, batch=%d, threads=%d, defrag=%.2f, flash=%b, embeddings=%b]",
                 gpuLayers, offloadKvToGpu, contextSize, batchSize, cpuThreads, defragThreshold, flashAttention, embeddings
         );
     }

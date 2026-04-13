@@ -2,12 +2,14 @@ package ffm.llama.model;
 
 import ffm.llama.binding.LlamaBindings;
 import ffm.llama.config.ModelConfig;
+import ffm.llama.utils.TemplateDetector;
 
 import java.lang.foreign.*;
 import java.lang.invoke.VarHandle;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 
 /**
  * Represents a loaded llama.cpp model configuration.
@@ -253,6 +255,26 @@ public class LlamaModel implements AutoCloseable {
     }
 
     /**
+     * Retrieves the GGUF chat template (e.g., Jinja2 format) from the model.
+     * Returns null if no template is found.
+     */
+    public String getChatTemplate() {
+        try {
+            // Pass NULL for the 'name' parameter to get the default template
+            MemorySegment templatePtr = (MemorySegment) LlamaBindings.llama_model_chat_template.invoke(modelPtr, MemorySegment.NULL);
+
+            if (templatePtr.equals(MemorySegment.NULL)) {
+                return null;
+            }
+
+            // Convert the native C-string to a Java String
+            return templatePtr.reinterpret(Long.MAX_VALUE).getString(0);
+        } catch (Throwable t) {
+            throw new RuntimeException("Failed to retrieve chat template", t);
+        }
+    }
+
+    /**
      * Tokenize a string into token IDs
      *
      * @param text Text to tokenize
@@ -366,20 +388,16 @@ public class LlamaModel implements AutoCloseable {
         System.out.println("=".repeat(60));
         System.out.println("Model Information");
         System.out.println("=".repeat(60));
-        System.out.println("Path:            " + modelPath);
+        System.out.println("Model Name       " + Paths.get(modelPath).getFileName().toString());
+        System.out.println("Model Template   " + TemplateDetector.detectTemplate(getChatTemplate()));
         System.out.println("Vocab Size:      " + String.format("%,d", nVocab));
         System.out.println("Embedding Dim:   " + nEmbd);
         System.out.println("Layers:          " + nLayer);
         System.out.println("Train Context:   " + String.format("%,d", nCtxTrain));
         System.out.println("BOS Token:       " + getBosToken());
         System.out.println("EOS Token:       " + getEosToken());
-        if (modelConfig != null) {
-            System.out.println("-".repeat(60));
-            System.out.println("Model Configuration");
-            System.out.println("-".repeat(60));
-            System.out.println(modelConfig);
-        }
         System.out.println("=".repeat(60));
+        System.out.println("\n\n");
     }
 
     @Override
