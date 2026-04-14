@@ -4,6 +4,7 @@ import java.lang.foreign.*;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.invoke.VarHandle;
 import java.nio.charset.Charset;
 
 /**
@@ -107,6 +108,11 @@ public class LlamaBindings {
             ValueLayout.JAVA_LONG.withName("n_samplers")                    // Backend sampler chain configuration (make sure the caller keeps the sampler chains alive)
     ).withByteAlignment(8).withName("llama_context_params");
 
+    // ============================================================================
+    // CACHED VARHANDLES - Context Params
+    // ============================================================================
+
+
     /**
      * Layout for llama_batch
      * Used for efficient batch processing during prefill and decode
@@ -137,6 +143,35 @@ public class LlamaBindings {
             ValueLayout.ADDRESS.withName("role"),
             ValueLayout.ADDRESS.withName("content")
     ).withByteAlignment(8).withName("llama_chat_message");
+
+    // ============================================================================
+    // CACHED VARHANDLES
+    // ============================================================================
+
+    // Model
+    public static final VarHandle MODEL_N_GPU_LAYERS = MODEL_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_gpu_layers"));
+    public static final VarHandle MODEL_USE_MMAP = MODEL_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("use_mmap"));
+    public static final VarHandle MODEL_USE_MLOCK = MODEL_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("use_mlock"));
+
+    // Context
+    public static final VarHandle CONTEXT_N_CTX = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_ctx"));
+    public static final VarHandle CONTEXT_N_BATCH = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_batch"));
+    public static final VarHandle CONTEXT_N_UBATCH = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_ubatch"));
+    public static final VarHandle CONTEXT_N_THREADS = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_threads"));
+    public static final VarHandle CONTEXT_N_THREADS_BATCH = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_threads_batch"));
+    public static final VarHandle CONTEXT_OFFLOAD_KQV = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("offload_kqv"));
+    public static final VarHandle CONTEXT_FLASH_ATTN_TYPE = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("flash_attn_type"));
+    public static final VarHandle CONTEXT_DEFRAG_THOLD = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("defrag_thold"));
+    public static final VarHandle CONTEXT_NO_PERF = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("no_perf"));
+    public static final VarHandle CONTEXT_EMBEDDINGS = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("embeddings"));
+
+    // Batch
+    public static final VarHandle BATCH_N_TOKENS = BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_tokens"));
+    public static final VarHandle BATCH_TOKEN = BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("token"));
+    public static final VarHandle BATCH_POS = BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("pos"));
+    public static final VarHandle BATCH_N_SEQ_ID = BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_seq_id"));
+    public static final VarHandle BATCH_SEQ_ID = BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("seq_id"));
+    public static final VarHandle BATCH_LOGITS = BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("logits"));
 
     // ============================================================================
     // CORE LIFECYCLE FUNCTIONS

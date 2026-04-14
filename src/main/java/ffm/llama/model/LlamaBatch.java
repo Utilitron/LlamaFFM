@@ -3,7 +3,6 @@ package ffm.llama.model;
 import ffm.llama.binding.LlamaBindings;
 
 import java.lang.foreign.*;
-import java.lang.invoke.VarHandle;
 
 /**
  * Wrapper for llama_batch for efficient token processing
@@ -12,7 +11,6 @@ import java.lang.invoke.VarHandle;
 public class LlamaBatch implements AutoCloseable {
 
     private final MemorySegment batchSegment;
-    private final Arena batchArena;
     private final int maxTokens;
     private int nTokens;
 
@@ -32,35 +30,29 @@ public class LlamaBatch implements AutoCloseable {
     public LlamaBatch(int maxTokens, int maxSeqId) {
         this.maxTokens = maxTokens;
         this.nTokens = 0;
-        this.batchArena = Arena.ofShared();
 
         try {
             // Initialize batch using llama_batch_init
-            this.batchSegment = (MemorySegment) LlamaBindings.llama_batch_init.invoke(batchArena, maxTokens, 0, maxSeqId);
+            // Note: We pass Arena.global() because the batch memory is managed by llama.cpp
+            this.batchSegment = (MemorySegment) LlamaBindings.llama_batch_init.invoke(Arena.global(), maxTokens, 0, maxSeqId);
 
-            // Extract pointers from the batch struct for direct manipulation
-            VarHandle tokenHandle = LlamaBindings.BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("token"));
-            MemorySegment rawTokenPtr = (MemorySegment) tokenHandle.get(batchSegment, 0L);
+            // Extract pointers from the batch struct for direct manipulation using cached VarHandles
+            MemorySegment rawTokenPtr = (MemorySegment) LlamaBindings.BATCH_TOKEN.get(batchSegment, 0L);
             this.tokenPtr = rawTokenPtr.reinterpret((long) maxTokens * Integer.BYTES);
 
-            VarHandle posHandle = LlamaBindings.BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("pos"));
-            MemorySegment rawPosPtr = (MemorySegment) posHandle.get(batchSegment, 0L);
+            MemorySegment rawPosPtr = (MemorySegment) LlamaBindings.BATCH_POS.get(batchSegment, 0L);
             this.posPtr = rawPosPtr.reinterpret((long) maxTokens * Integer.BYTES);
 
-            VarHandle nSeqIdHandle = LlamaBindings.BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_seq_id"));
-            MemorySegment rawNSeqIdPtr = (MemorySegment) nSeqIdHandle.get(batchSegment, 0L);
+            MemorySegment rawNSeqIdPtr = (MemorySegment) LlamaBindings.BATCH_N_SEQ_ID.get(batchSegment, 0L);
             this.nSeqIdPtr = rawNSeqIdPtr.reinterpret((long) maxTokens * Integer.BYTES);
 
-            VarHandle seqIdHandle = LlamaBindings.BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("seq_id"));
-            MemorySegment rawSeqIdPtr = (MemorySegment) seqIdHandle.get(batchSegment, 0L);
+            MemorySegment rawSeqIdPtr = (MemorySegment) LlamaBindings.BATCH_SEQ_ID.get(batchSegment, 0L);
             this.seqIdPtr = rawSeqIdPtr.reinterpret((long) maxTokens * ValueLayout.ADDRESS.byteSize());
 
-            VarHandle logitsHandle = LlamaBindings.BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("logits"));
-            MemorySegment rawLogitsPtr = (MemorySegment) logitsHandle.get(batchSegment, 0L);
+            MemorySegment rawLogitsPtr = (MemorySegment) LlamaBindings.BATCH_LOGITS.get(batchSegment, 0L);
             this.logitsPtr = rawLogitsPtr.reinterpret((long) maxTokens * Byte.BYTES);
 
-            // DO NOT re-allocate seq_id pointers – they are already allocated by llama_batch_init.
-            // Just verify they are non-null (they will be).
+            // Verify seq_id pointers are properly allocated by llama_batch_init
             for (int i = 0; i < maxTokens; i++) {
                 MemorySegment inner = seqIdPtr.getAtIndex(ValueLayout.ADDRESS, i);
                 if (inner == MemorySegment.NULL) {
@@ -69,7 +61,6 @@ public class LlamaBatch implements AutoCloseable {
             }
 
         } catch (Throwable t) {
-            batchArena.close();
             throw new RuntimeException("Failed to initialize batch", t);
         }
     }
@@ -131,10 +122,8 @@ public class LlamaBatch implements AutoCloseable {
 
             nTokens++;
 
-            // Update n_tokens in the batch struct
-            VarHandle nTokensHandle = LlamaBindings.BATCH_LAYOUT.varHandle(
-                    MemoryLayout.PathElement.groupElement("n_tokens"));
-            nTokensHandle.set(batchSegment, 0L, nTokens);
+            // Update n_tokens in the batch struct using cached VarHandle
+            LlamaBindings.BATCH_N_TOKENS.set(batchSegment, 0L, nTokens);
 
         } catch (Throwable t) {
             throw new RuntimeException("Failed to add token to batch", t);
@@ -183,8 +172,7 @@ public class LlamaBatch implements AutoCloseable {
     public void clear() {
         nTokens = 0;
         try {
-            VarHandle nTokensHandle = LlamaBindings.BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_tokens"));
-            nTokensHandle.set(batchSegment, 0L, 0);
+            LlamaBindings.BATCH_N_TOKENS.set(batchSegment, 0L, 0);
         } catch (Throwable t) {
             throw new RuntimeException("Failed to clear batch", t);
         }
@@ -193,7 +181,7 @@ public class LlamaBatch implements AutoCloseable {
     @Override
     public void close() {
         try {
-            // Free the batch
+            // Free the batch memory managed by llama.cpp
             LlamaBindings.llama_batch_free.invoke(batchSegment);
         } catch (Throwable t) {
             System.err.println("Warning: Failed to free batch: " + t.getMessage());
