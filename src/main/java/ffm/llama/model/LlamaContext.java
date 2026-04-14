@@ -4,7 +4,6 @@ import ffm.llama.binding.LlamaBindings;
 import ffm.llama.config.ModelConfig;
 
 import java.lang.foreign.*;
-import java.lang.invoke.VarHandle;
 import java.nio.file.Paths;
 
 /**
@@ -79,54 +78,34 @@ public class LlamaContext implements AutoCloseable {
     private void applyModelConfigToContextParams(MemorySegment contextParams) {
         try {
             // Context size
-            VarHandle nCtxHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
-                    MemoryLayout.PathElement.groupElement("n_ctx"));
-            nCtxHandle.set(contextParams, 0L, modelConfig.getContextSize());
+            LlamaBindings.CONTEXT_N_CTX.set(contextParams, 0L, modelConfig.getContextSize());
 
             // Batch size
-            VarHandle nBatchHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
-                    MemoryLayout.PathElement.groupElement("n_batch"));
-            nBatchHandle.set(contextParams, 0L, modelConfig.getBatchSize());
+            LlamaBindings.CONTEXT_N_BATCH.set(contextParams, 0L, modelConfig.getBatchSize());
 
             // Physical batch size
-            VarHandle nUbatchHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
-                    MemoryLayout.PathElement.groupElement("n_ubatch"));
-            nUbatchHandle.set(contextParams, 0L, Math.min(512, modelConfig.getBatchSize()));
+            LlamaBindings.CONTEXT_N_UBATCH.set(contextParams, 0L, Math.min(512, modelConfig.getBatchSize()));
 
             // CPU threads
-            VarHandle nThreadsHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
-                    MemoryLayout.PathElement.groupElement("n_threads"));
-            nThreadsHandle.set(contextParams, 0L, modelConfig.getCpuThreads());
+            LlamaBindings.CONTEXT_N_THREADS.set(contextParams, 0L, modelConfig.getCpuThreads());
 
             // Batch threads
-            VarHandle nThreadsBatchHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
-                    MemoryLayout.PathElement.groupElement("n_threads_batch"));
-            nThreadsBatchHandle.set(contextParams, 0L, modelConfig.getCpuThreads());
+            LlamaBindings.CONTEXT_N_THREADS_BATCH.set(contextParams, 0L, modelConfig.getCpuThreads());
 
             // KV cache offloading
-            VarHandle offloadKqvHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
-                    MemoryLayout.PathElement.groupElement("offload_kqv"));
-            offloadKqvHandle.set(contextParams, 0L, (byte) (modelConfig.isOffloadKvToGpu() ? 1 : 0));
+            LlamaBindings.CONTEXT_OFFLOAD_KQV.set(contextParams, 0L, (byte) (modelConfig.isOffloadKvToGpu() ? 1 : 0));
 
             // Flash attention (INT, correct field name)
-            VarHandle flashAttnHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
-                    MemoryLayout.PathElement.groupElement("flash_attn_type"));
-            flashAttnHandle.set(contextParams, 0L, modelConfig.isFlashAttention() ? 1 : 0);
+            LlamaBindings.CONTEXT_FLASH_ATTN_TYPE.set(contextParams, 0L, modelConfig.isFlashAttention() ? 1 : 0);
 
             // Defragmentation threshold
-            VarHandle defragHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
-                    MemoryLayout.PathElement.groupElement("defrag_thold"));
-            defragHandle.set(contextParams, 0L, modelConfig.getDefragThreshold());
+            LlamaBindings.CONTEXT_DEFRAG_THOLD.set(contextParams, 0L, modelConfig.getDefragThreshold());
 
             // Performance metrics
-            VarHandle noPerfHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
-                    MemoryLayout.PathElement.groupElement("no_perf"));
-            noPerfHandle.set(contextParams, 0L, (byte) 0);
+            LlamaBindings.CONTEXT_NO_PERF.set(contextParams, 0L, (byte) 0);
 
             // Embeddings
-            VarHandle embeddingsHandle = LlamaBindings.CONTEXT_PARAMS_LAYOUT.varHandle(
-                    MemoryLayout.PathElement.groupElement("embeddings"));
-            embeddingsHandle.set(contextParams, 0L, (byte) (modelConfig.isEmbeddings() ? 1 : 0));
+            LlamaBindings.CONTEXT_EMBEDDINGS.set(contextParams, 0L, (byte) (modelConfig.isEmbeddings() ? 1 : 0));
 
         } catch (Throwable t) {
             throw new RuntimeException("Failed to apply model config to context params", t);

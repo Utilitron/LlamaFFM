@@ -5,7 +5,6 @@ import ffm.llama.config.ModelConfig;
 import ffm.llama.utils.TemplateDetector;
 
 import java.lang.foreign.*;
-import java.lang.invoke.VarHandle;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -62,12 +61,9 @@ public class LlamaModel implements AutoCloseable {
             // If model config provided, override specific fields
             if (modelConfig != null) {
                 this.modelConfig = modelConfig;
-                VarHandle gpuLayersHandle = LlamaBindings.MODEL_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_gpu_layers"));
-                gpuLayersHandle.set(modelParams, 0L, modelConfig.getGpuLayers());
-                VarHandle mmapHandle = LlamaBindings.MODEL_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("use_mmap"));
-                mmapHandle.set(modelParams, 0L, (byte) (modelConfig.isUseMmap() ? 1 : 0));
-                VarHandle mlockHandle = LlamaBindings.MODEL_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("use_mlock"));
-                mlockHandle.set(modelParams, 0L, (byte) (modelConfig.isUseMlock() ? 1 : 0));
+                LlamaBindings.MODEL_N_GPU_LAYERS.set(modelParams, 0L, modelConfig.getGpuLayers());
+                LlamaBindings.MODEL_USE_MMAP.set(modelParams, 0L, (byte) (modelConfig.isUseMmap() ? 1 : 0));
+                LlamaBindings.MODEL_USE_MLOCK.set(modelParams, 0L, (byte) (modelConfig.isUseMlock() ? 1 : 0));
             } else {
                 // Auto-detect will happen after we know model size
                 this.modelConfig = null;
@@ -105,16 +101,13 @@ public class LlamaModel implements AutoCloseable {
     private void applyModelConfigToModelParams(MemorySegment modelParams, ModelConfig config) {
         try {
             // Set GPU layers
-            VarHandle gpuLayersHandle = LlamaBindings.MODEL_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_gpu_layers"));
-            gpuLayersHandle.set(modelParams, 0L, config.getGpuLayers());
+            LlamaBindings.MODEL_N_GPU_LAYERS.set(modelParams, 0L, config.getGpuLayers());
 
             // Set mmap usage (for SSD offloading)
-            VarHandle mmapHandle = LlamaBindings.MODEL_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("use_mmap"));
-            mmapHandle.set(modelParams, 0L, (byte) (modelConfig.isUseMmap() ? 1 : 0));
+            LlamaBindings.MODEL_USE_MMAP.set(modelParams, 0L, (byte) (modelConfig.isUseMmap() ? 1 : 0));
 
             // Set mlock usage (prevent swap for RAM-resident models)
-            VarHandle mlockHandle = LlamaBindings.MODEL_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("use_mlock"));
-            mlockHandle.set(modelParams, 0L, (byte) (modelConfig.isUseMlock() ? 1 : 0));
+            LlamaBindings.MODEL_USE_MLOCK.set(modelParams, 0L, (byte) (modelConfig.isUseMlock() ? 1 : 0));
 
         } catch (Throwable t) {
             throw new RuntimeException("Failed to apply model config to model params", t);
