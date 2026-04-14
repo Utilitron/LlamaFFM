@@ -3,6 +3,7 @@ package ffm.llama.service;
 import ffm.llama.binding.LlamaBindings;
 import ffm.llama.binding.LlamaPoolingType;
 import ffm.llama.config.ModelConfig;
+import ffm.llama.message.*;
 import ffm.llama.model.LlamaBatch;
 import ffm.llama.model.LlamaContext;
 import ffm.llama.model.LlamaModel;
@@ -23,43 +24,6 @@ import java.util.function.Consumer;
  * High-level LLM service
  */
 public class LlmService implements AutoCloseable {
-
-    //Interface for all messages passed to the LlmService
-    public interface LlmMessage {
-        String role();
-        String content();
-    }
-
-    //Interface for all messages passed to the LlmService with tools
-    public interface LlmMessageWithTools extends LlmMessage {
-        String toolDefinitions();
-    }
-
-    //Interface for all messages passed to the LlmService with tools
-    public interface LlmToolMessage extends LlmMessage {
-        String toolCallId();
-        String toolName();
-    }
-
-    // Simple container for the chat message
-    public record ChatMessage(
-            String role,
-            String content
-    ) implements LlmMessage {}
-
-    // Simple container for the chat message
-    public record ChatMessageWithTools(
-            String role,
-            String content,
-            String toolDefinitions
-    ) implements LlmMessageWithTools {}
-
-    public record ToolMessage(
-            String role,
-            String toolCallId,
-            String toolName,
-            String content
-    ) implements LlmToolMessage {}
 
     // Initialize llama.cpp backend once
     static {
@@ -204,14 +168,14 @@ public class LlmService implements AutoCloseable {
                 for (int i = 0; i < bakedHistory.size(); i++) {
                     LlmMessage msg = bakedHistory.get(i);
 
-                    if ("system".equals(msg.role())) {
-                        bakedHistory.set(i, new ChatMessage("system", msg.content() + " " + toolDefinitions));
+                    if (msg.role() == MessageRole.SYSTEM) {
+                        bakedHistory.set(i, new ChatMessage(MessageRole.SYSTEM, msg.content() + " " + toolDefinitions));
                         injected = true;
                         break;
                     }
                 }
 
-                if (!injected) bakedHistory.add(0, new ChatMessage("system", toolDefinitions));
+                if (!injected) bakedHistory.addFirst(new ChatMessage(MessageRole.SYSTEM, toolDefinitions));
             }
 
             int nativeCount = bakedHistory.size();
@@ -224,7 +188,7 @@ public class LlmService implements AutoCloseable {
                 LlmMessage msg = bakedHistory.get(i);
                 MemorySegment currentStruct = chatArray.asSlice(i * LlamaBindings.CHAT_LAYOUT.byteSize());
 
-                currentStruct.set(ValueLayout.ADDRESS, 0, arena.allocateFrom(msg.role()));
+                currentStruct.set(ValueLayout.ADDRESS, 0, arena.allocateFrom(msg.role().getValue()));
                 currentStruct.set(ValueLayout.ADDRESS, 8, arena.allocateFrom(msg.content()));
             }
 
