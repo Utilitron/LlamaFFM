@@ -107,6 +107,11 @@ public class LlamaContext implements AutoCloseable {
             // Embeddings
             LlamaBindings.CONTEXT_EMBEDDINGS.set(contextParams, 0L, (byte) (modelConfig.isEmbeddings() ? 1 : 0));
 
+            // KVCache Types
+            LlamaBindings.CONTEXT_K_CACHE_TYPE.set(contextParams, 0L, (byte) (modelConfig.getCacheTypeK().getNativeId()));
+            LlamaBindings.CONTEXT_V_CACHE_TYPE.set(contextParams, 0L, (byte) (modelConfig.getCacheTypeV().getNativeId()));
+
+
         } catch (Throwable t) {
             throw new RuntimeException("Failed to apply model config to context params", t);
         }
@@ -160,6 +165,30 @@ public class LlamaContext implements AutoCloseable {
         } catch (Throwable t) {
             throw new RuntimeException("Failed to clear KV cache", t);
         }
+    }
+
+    /**
+     * Shifts the context window left by discarding the oldest tokens,
+     * keeping the most recent `keepTokens` tokens.
+     *
+     * @param keepTokens Number of tokens to retain at the end of the sequence
+     * @return The number of tokens removed, or 0 if no shift was needed
+     */
+    public int shiftContextLeft(int keepTokens) {
+        int currentTokens = getMaxSequencePosition(0) + 1;
+        if (currentTokens <= keepTokens) {
+            return 0;
+        }
+
+        int tokensToRemove = currentTokens - keepTokens;
+
+        // Remove tokens from position 0 to tokensToRemove-1
+        removeKvCacheTokens(0, 0, tokensToRemove - 1);
+
+        // Shift remaining tokens to start at position 0
+        shiftKvCacheSequence(0, tokensToRemove, currentTokens - 1, -tokensToRemove);
+
+        return tokensToRemove;
     }
 
     /**

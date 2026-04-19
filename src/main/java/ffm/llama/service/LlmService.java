@@ -1,7 +1,7 @@
 package ffm.llama.service;
 
 import ffm.llama.binding.LlamaBindings;
-import ffm.llama.binding.LlamaPoolingType;
+import ffm.llama.enums.PoolingType;
 import ffm.llama.config.ModelConfig;
 import ffm.llama.message.*;
 import ffm.llama.model.LlamaBatch;
@@ -24,6 +24,8 @@ import java.util.function.Consumer;
  * High-level LLM service
  */
 public class LlmService implements AutoCloseable {
+
+    private boolean verbose = false;
 
     // Initialize llama.cpp backend once
     static {
@@ -109,8 +111,10 @@ public class LlmService implements AutoCloseable {
             loadedModels.put(modelName, instance);
 
             System.out.println("Loaded model: " + modelName);
-            model.printInfo();
-            context.printInfo();
+            if (verbose) {
+                model.printInfo();
+                context.printInfo();
+            }
 
             return modelName;
 
@@ -276,22 +280,63 @@ public class LlmService implements AutoCloseable {
             // Tokenize prompt
             int[] promptTokens = model.tokenize(formattedPrompt, true, true);
 
-            // Calculate how many slots are left in your context window
-            int maxPossibleTokens = Math.max(1, ctx.getModelConfig().getContextSize() - promptTokens.length);
+            // Get context size from model config
+            int contextSize = ctx.getModelConfig().getContextSize();
 
-            // Prefill phase - process prompt in parallel
-            try (LlamaBatch batch = LlamaBatch.forTokens(promptTokens, 0, 0, true)) {
-                int ret = ctx.decode(batch);
-                if (ret != 0) {
-                    throw new RuntimeException("Failed to decode prompt batch");
-                }
+            // Get batch size from model config
+            int batchSize = ctx.getModelConfig().getBatchSize();
+
+            // Context overflow - prevents native crashes and undefined behavior
+            if (promptTokens.length > contextSize) {
+                throw new IllegalStateException(String.format("Prompt exceeds context window: %d > %d", promptTokens.length, contextSize));
             }
 
-            // Decode phase - generate tokens one by one
-            int nCur = promptTokens.length;
-            int nDecoded = 0;
+            // Large prompt advisory (non-fatal) - helps identify batching usage
+            if (promptTokens.length > batchSize && verbose) {
+                System.out.printf("[LlmService] Large prompt: %d tokens (batch=%d, ctx=%d)%n", promptTokens.length, batchSize, contextSize);
+            }
 
-            while (nDecoded < maxPossibleTokens) {
+
+            // Prefill phase - process prompt in batches
+            int nCur = 0;
+            while (nCur < promptTokens.length) {
+                int chunkSize = Math.min(batchSize, promptTokens.length - nCur);
+                int[] chunk = Arrays.copyOfRange(promptTokens, nCur, nCur + chunkSize);
+                boolean lastBatch = (nCur + chunkSize >= promptTokens.length);
+
+                try (LlamaBatch batch = LlamaBatch.forTokens(chunk, nCur, 0, lastBatch)) {
+                    int ret = ctx.decode(batch);
+                    if (ret != 0) {
+                        throw new RuntimeException("Failed to decode prompt batch at offset " + nCur);
+                    }
+                }
+                nCur += chunkSize;
+            }
+
+            // Decode phase with automatic sliding window
+            int nDecoded = 0;
+            final int SAFETY_MARGIN = 256;                 // Tokens to leave free
+            final double KEEP_RATIO = 0.5;                 // Keep last 50% of context
+
+            while (true) {
+                // Check if we're approaching context limit
+                int tokensUsed = nCur;
+                if (tokensUsed >= contextSize - SAFETY_MARGIN) {
+                    int keepTokens = (int) (contextSize * KEEP_RATIO);
+                    int removed = ctx.shiftContextLeft(keepTokens);
+                    if (removed > 0) {
+                        nCur -= removed;  // Adjust current position
+                        if (verbose) {
+                            System.out.printf("[LlmService] Context shifted: removed %d tokens, now at position %d/%d%n",
+                                    removed, nCur, contextSize);
+                        }
+                    } else {
+                        // Shift failed or not enough tokens to keep; break to avoid infinite loop
+                        System.err.println("[LlmService] Unable to shift context, terminating generation.");
+                        break;
+                    }
+                }
+
                 // Sample next token
                 int nextToken = sampler.sample(ctx, -1);
 
@@ -300,15 +345,14 @@ public class LlmService implements AutoCloseable {
                     break;
                 }
 
-                // Convert to text and callback
                 String tokenText = model.tokenToString(nextToken);
                 callback.accept(tokenText);
 
-                // Decode next position
+                // Decode the token
                 try (LlamaBatch batch = LlamaBatch.forSingleToken(nextToken, nCur, 0)) {
                     int ret = ctx.decode(batch);
                     if (ret != 0) {
-                        throw new RuntimeException("Failed to decode token");
+                        throw new RuntimeException("Failed to decode token at position " + nCur);
                     }
                 }
 
@@ -316,7 +360,9 @@ public class LlmService implements AutoCloseable {
                 nDecoded++;
             }
 
-            if (nDecoded >= maxPossibleTokens) throw new IllegalStateException("Ran out of tokens");
+            if (verbose) {
+                System.out.printf("[LlmService] Generation complete: %d tokens produced, final position %d/%d%n", nDecoded, nCur, contextSize);
+            }
 
         } catch (Exception e) {
             throw new RuntimeException("Generation failed for model: " + modelName, e);
@@ -353,7 +399,7 @@ public class LlmService implements AutoCloseable {
 
             // Get pooling type to determine strategy
             int poolingType = (int) LlamaBindings.llama_pooling_type.invokeExact(ctx.ptr());
-            boolean isNone = poolingType == LlamaPoolingType.NONE.getValue();
+            boolean isNone = poolingType == PoolingType.NONE.getValue();
 
             int[] tokens = model.tokenize(text, true, false);
 
@@ -369,7 +415,7 @@ public class LlmService implements AutoCloseable {
             }
 
             // Retrieve computed embeddings
-            if (poolingType == LlamaPoolingType.NONE.getValue()) {
+            if (poolingType == PoolingType.NONE.getValue()) {
                 // Access the full token-level embedding buffer
                 MemorySegment allEmbeds = (MemorySegment) LlamaBindings.llama_get_embeddings.invokeExact(ctx.ptr());
                 // Offset to the last token: (tokens.length - 1) * n_embd * sizeof(float)
@@ -416,6 +462,8 @@ public class LlmService implements AutoCloseable {
                 TemplateDetector.getTemplateName(model.getChatTemplate()),
                 model.getParameterCount(),
                 model.getModelSizeGB(),
+                model.getLayerCount(),
+                model.getEmbeddingSize(),
                 instance.modelConfig,
                 instance.lastUsedMs
         );
@@ -448,6 +496,17 @@ public class LlmService implements AutoCloseable {
         unloadModel(path);
         return true;
 
+    }
+
+    /**
+     * Enable or disable verbose console output (model loading info, etc.)
+     */
+    public void setVerbose(boolean verbose) {
+        this.verbose = verbose;
+    }
+
+    public boolean isVerbose() {
+        return verbose;
     }
 
     /**
@@ -484,14 +543,16 @@ public class LlmService implements AutoCloseable {
             String templateName,
             long paramCount,
             double sizeGB,
+            int layerCount,
+            int embeddingSize,
             ModelConfig modelConfig,
             long lastUsedMs
     ) {
         @Override
         public String toString() {
             long ageMs = System.currentTimeMillis() - lastUsedMs;
-            return String.format("Model[%.1fB params, %.2f GB, age=%ds]",
-                    paramCount / 1_000_000_000.0, sizeGB, ageMs / 1000);
+            return String.format("Model[%.1fB params, %.2f GB, layers=%d, embd=%d, age=%ds]",
+                    paramCount / 1_000_000_000.0, sizeGB, layerCount, embeddingSize, ageMs / 1000);
         }
     }
 }

@@ -1,6 +1,6 @@
-package ffm.llama.binding;
+package ffm.llama.enums;
 
-public enum LlamaPoolingType {
+public enum PoolingType {
     UNSPECIFIED(-1),
     NONE(0),
     MEAN(1),
@@ -10,7 +10,7 @@ public enum LlamaPoolingType {
 
     private final int value;
 
-    LlamaPoolingType(int value) {
+    PoolingType(int value) {
         this.value = value;
     }
 
@@ -18,8 +18,8 @@ public enum LlamaPoolingType {
         return value;
     }
 
-    public static LlamaPoolingType fromValue(int value) {
-        for (LlamaPoolingType type : values()) {
+    public static PoolingType fromValue(int value) {
+        for (PoolingType type : values()) {
             if (type.value == value) {
                 return type;
             }

@@ -1,5 +1,7 @@
 package ffm.llama.config;
 
+import ffm.llama.enums.KVCacheType;
+
 /**
  * Configuration for LLM Model
  */
@@ -39,6 +41,24 @@ public class ModelConfig {
     /** Enable embeddings */
     private final boolean embeddings;
 
+    /** Key cache precision */
+    private final KVCacheType cacheTypeK;
+
+    /** Value cache precision */
+    private final KVCacheType cacheTypeV;
+
+    /** Optional JSON schema for constrained decoding */
+    private final String jsonSchema;
+
+    /** Enable GBNF grammar enforcement */
+    private final boolean enableGrammar;
+
+    private final boolean dynamicAttentionSharpening;
+
+    private final double attentionSharpeningFactor;  // c in α(N) = 1 + c × √(ln N)
+
+
+
     // ============================================================================
     // CONSTRUCTORS
     // ============================================================================
@@ -54,23 +74,92 @@ public class ModelConfig {
         this.defragThreshold = builder.defragThreshold;
         this.flashAttention = builder.flashAttention;
         this.embeddings = builder.embeddings;
+        this.cacheTypeK = builder.cacheTypeK;
+        this.cacheTypeV = builder.cacheTypeV;
+        this.jsonSchema = builder.jsonSchema;
+        this.enableGrammar = builder.enableGrammar;
+        this.dynamicAttentionSharpening = builder.dynamicAttentionSharpening;
+        this.attentionSharpeningFactor = builder.attentionSharpeningFactor;
     }
 
     // ============================================================================
     // BUILDER PATTERN
     // ============================================================================
 
+    /**
+     * Create a sensible default configuration
+     * Designed for consumer-grade hardware with balanced performance
+     */
+    public static ModelConfig createDefault() {
+        return Builder.create()
+                .gpuLayers(0)           // CPU-only by default (safest)
+                .useMmap(true)          // Enable for large models on SSD
+                .useMlock(false)        // Disable to avoid locking RAM
+                .contextSize(2048)      // Reasonable default
+                .batchSize(512)
+                .cpuThreads(Runtime.getRuntime().availableProcessors())
+                .flashAttention(false)
+                .embeddings(false)
+                .cacheTypeK(KVCacheType.F16)    // Standard precision
+                .cacheTypeV(KVCacheType.F16)
+                .build();
+    }
+
+    /**
+     * Optimized for long-context RAG on consumer GPUs
+     * Uses asymmetric TurboQuant: K=q8_0 (preserve positions), V=tq3_0 (aggressive)
+     */
+    public static ModelConfig longContextConsumer() {
+        return Builder.create()
+                .gpuLayers(99)
+                .useMmap(true)
+                .contextSize(32768)     // 32K context
+                .batchSize(512)
+                .flashAttention(true)
+                .cacheTypeK(KVCacheType.Q8_0)       // Higher precision for keys
+                .cacheTypeV(KVCacheType.TQ3_0)      // TurboQuant for values (5.2x compression)
+                .dynamicAttentionSharpening(true)   // Mitigate quantization noise
+                .attentionSharpeningFactor(0.1)
+                .build();
+    }
+
+    /**
+     * Extreme memory savings for 128K+ contexts
+     * Uses full TurboQuant pipeline with QJL error correction
+     */
+    public static ModelConfig extremeCompression() {
+        return Builder.create()
+                .gpuLayers(99)
+                .useMmap(true)
+                .contextSize(131072)    // 128K context
+                .batchSize(512)
+                .flashAttention(true)
+                .cacheTypeK(KVCacheType.TBQP3)      // TurboQuant + QJL (~3.0 bpw)
+                .cacheTypeV(KVCacheType.TBQP3)
+                .dynamicAttentionSharpening(true)
+                .attentionSharpeningFactor(0.15)    // Higher for extreme compression
+                .build();
+    }
+
     public static class Builder {
         private int gpuLayers = 0;
         private boolean offloadKvToGpu = false;
-        private boolean useMmap = false;
+        private boolean useMmap = true;
         private boolean useMlock = false;
         private int contextSize = 2048;
         private int batchSize = 512;
-        private int cpuThreads = 4;
+        private int cpuThreads = Runtime.getRuntime().availableProcessors();
         private float defragThreshold = 0.1f;
         private boolean flashAttention = false;
         private boolean embeddings = false;
+        private KVCacheType cacheTypeK = KVCacheType.F16;
+        private KVCacheType cacheTypeV = KVCacheType.F16;
+        private String jsonSchema = null;
+        private boolean enableGrammar = false;
+        private boolean dynamicAttentionSharpening = false;
+        private double attentionSharpeningFactor = 0.1;
+
+        private Builder() {}
 
         public static Builder create() {
             return new Builder();
@@ -126,6 +215,46 @@ public class ModelConfig {
             return this;
         }
 
+        public Builder cacheTypeK(KVCacheType cacheType) {
+            this.cacheTypeK = cacheType;
+            return this;
+        }
+
+        public Builder cacheTypeV(KVCacheType cacheType) {
+            this.cacheTypeV = cacheType;
+            return this;
+        }
+
+        public Builder cacheType(KVCacheType cacheType) {
+            this.cacheTypeK = cacheType;
+            this.cacheTypeV = cacheType;
+            return this;
+        }
+
+        public Builder jsonSchema(String schema) {
+            this.jsonSchema = schema;
+            this.enableGrammar = (schema != null);
+            return this;
+        }
+
+        public Builder enableGrammar(boolean enable) {
+            this.enableGrammar = enable;
+            return this;
+        }
+
+        public Builder dynamicAttentionSharpening(boolean enable) {
+            this.dynamicAttentionSharpening = enable;
+            return this;
+        }
+
+        public Builder attentionSharpeningFactor(double factor) {
+            if (factor < 0 || factor > 1.0) {
+                throw new IllegalArgumentException("Sharpening factor must be between 0 and 1.0");
+            }
+            this.attentionSharpeningFactor = factor;
+            return this;
+        }
+
         public ModelConfig build() {
             return new ModelConfig(this);
         }
@@ -135,43 +264,23 @@ public class ModelConfig {
     // GETTERS
     // ============================================================================
 
-    public int getGpuLayers() {
-        return gpuLayers;
-    }
-
-    public boolean isOffloadKvToGpu() {
-        return offloadKvToGpu;
-    }
-
-    public boolean isUseMmap() {
-        return useMmap;
-    }
-
-    public boolean isUseMlock() {
-        return useMlock;
-    }
-
-    public int getContextSize() {
-        return contextSize;
-    }
-
-    public int getBatchSize() {
-        return batchSize;
-    }
-
-    public int getCpuThreads() {
-        return cpuThreads;
-    }
-
-    public float getDefragThreshold() {
-        return defragThreshold;
-    }
-
-    public boolean isFlashAttention() {
-        return flashAttention;
-    }
-
+    public int getGpuLayers() { return gpuLayers;}
+    public boolean isOffloadKvToGpu() { return offloadKvToGpu;}
+    public boolean isUseMmap() { return useMmap;}
+    public boolean isUseMlock() { return useMlock;}
+    public int getContextSize() { return contextSize;}
+    public int getBatchSize() { return batchSize;}
+    public int getCpuThreads() { return cpuThreads;}
+    public float getDefragThreshold() { return defragThreshold;}
+    public boolean isFlashAttention() { return flashAttention; }
     public boolean isEmbeddings() { return embeddings; }
+    public KVCacheType getCacheTypeK() { return cacheTypeK; }
+    public KVCacheType getCacheTypeV() { return cacheTypeV; }
+    public String getJsonSchema() { return jsonSchema; }
+    public boolean isEnableGrammar() { return enableGrammar; }
+    public boolean isDynamicAttentionSharpening() { return dynamicAttentionSharpening; }
+    public double getAttentionSharpeningFactor() { return attentionSharpeningFactor; }
+
 
     // ============================================================================
     // UTILITIES
@@ -191,8 +300,8 @@ public class ModelConfig {
     @Override
     public String toString() {
         return String.format(
-                "ModelConfig[gpu_layers=%d, kv_gpu=%b, ctx=%d, batch=%d, threads=%d, defrag=%.2f, flash=%b, embeddings=%b]",
-                gpuLayers, offloadKvToGpu, contextSize, batchSize, cpuThreads, defragThreshold, flashAttention, embeddings
+                "ModelConfig[gpu_layers=%d, kv_gpu=%b, ctx=%d, batch=%d, threads=%d, defrag=%.2f, flash=%b, cacheK=%s, cacheV=%s, grammar=%b, dynAttn=%b]",
+                gpuLayers, offloadKvToGpu, contextSize, batchSize, cpuThreads, defragThreshold, flashAttention, cacheTypeK.name(), cacheTypeV.name(), enableGrammar, dynamicAttentionSharpening
         );
     }
 }
