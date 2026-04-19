@@ -25,8 +25,20 @@ This project utilizes Project Panama (Foreign Function & Memory API) to provide 
 - (Optional) CUDA/ROCm/Metal drivers for GPU acceleration
 
 **Validated Build**: 8562 (Commit: c46758d28)
+
 **Compiler**: GCC 13.3.0
+
 **Tested OS**: Linux (Ubuntu/Mint) with Vulkan backend
+
+
+### Building the Library
+LlamaFFM is not yet published to Maven Central. You must build and install it locally:
+
+```bash
+git clone https://github.com/your-org/LlamaFFM.git
+cd LlamaFFM
+mvn clean install
+```
 
 ### Maven Dependency
 ```xml
