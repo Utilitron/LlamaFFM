@@ -164,6 +164,8 @@ public class LlamaBindings {
     public static final VarHandle CONTEXT_DEFRAG_THOLD = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("defrag_thold"));
     public static final VarHandle CONTEXT_NO_PERF = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("no_perf"));
     public static final VarHandle CONTEXT_EMBEDDINGS = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("embeddings"));
+    public static final VarHandle CONTEXT_K_CACHE_TYPE = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("type_k"));
+    public static final VarHandle CONTEXT_V_CACHE_TYPE = CONTEXT_PARAMS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("type_v"));
 
     // Batch
     public static final VarHandle BATCH_N_TOKENS = BATCH_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("n_tokens"));

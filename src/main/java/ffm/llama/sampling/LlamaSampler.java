@@ -90,7 +90,7 @@ public class LlamaSampler implements AutoCloseable {
             LlamaBindings.llama_sampler_chain_add.invoke(samplerChain, minPSampler);
         }
 
-// Apply Grammar Constraint
+        // Apply Grammar Constraint
         if (config.grammar != null) {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment root = arena.allocateFrom("root");

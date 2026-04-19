@@ -31,7 +31,7 @@ public class LlamaModel implements AutoCloseable {
     private final long modelSizeBytes;
 
     /**
-     * Load a model from disk
+     * Load a model from disk with default configuration
      */
     public LlamaModel(String path) {
         this(path, null);
@@ -41,7 +41,7 @@ public class LlamaModel implements AutoCloseable {
      * Load a model with explicit model configuration
      * 
      * @param path Path to .gguf model file
-     * @param modelConfig Model configuration (null = auto-detect)
+     * @param modelConfig Model configuration (null = auto-detect and use defaults)
      */
     public LlamaModel(String path, ModelConfig modelConfig) {
         this.modelPath = path;
@@ -54,20 +54,16 @@ public class LlamaModel implements AutoCloseable {
             // Create model parameters struct
             MemorySegment modelParams = modelArena.allocate(LlamaBindings.MODEL_PARAMS_LAYOUT);
 
-            // Get default parameters
+            // Get default parameters from llama.cpp
             MemorySegment defaultParams = (MemorySegment) LlamaBindings.llama_model_default_params.invoke(modelArena);
             MemorySegment.copy(defaultParams, 0, modelParams, 0, LlamaBindings.MODEL_PARAMS_LAYOUT.byteSize());
 
-            // If model config provided, override specific fields
-            if (modelConfig != null) {
-                this.modelConfig = modelConfig;
-                LlamaBindings.MODEL_N_GPU_LAYERS.set(modelParams, 0L, modelConfig.getGpuLayers());
-                LlamaBindings.MODEL_USE_MMAP.set(modelParams, 0L, (byte) (modelConfig.isUseMmap() ? 1 : 0));
-                LlamaBindings.MODEL_USE_MLOCK.set(modelParams, 0L, (byte) (modelConfig.isUseMlock() ? 1 : 0));
-            } else {
-                // Auto-detect will happen after we know model size
-                this.modelConfig = null;
-            }
+            // Always ensure we have a config (use default if null)
+            this.modelConfig = (modelConfig != null) 
+                ? modelConfig 
+                : ModelConfig.createDefault();
+
+            applyModelConfigToModelParams(modelParams, this.modelConfig);
 
             // Load the model
             MemorySegment rawPtr = (MemorySegment) LlamaBindings.llama_model_load_from_file.invoke(cPath, modelParams);
@@ -100,14 +96,14 @@ public class LlamaModel implements AutoCloseable {
      */
     private void applyModelConfigToModelParams(MemorySegment modelParams, ModelConfig config) {
         try {
-            // Set GPU layers
+            // Set GPU layers (0 = CPU only, >0 = offload N layers to GPU)
             LlamaBindings.MODEL_N_GPU_LAYERS.set(modelParams, 0L, config.getGpuLayers());
 
-            // Set mmap usage (for SSD offloading)
-            LlamaBindings.MODEL_USE_MMAP.set(modelParams, 0L, (byte) (modelConfig.isUseMmap() ? 1 : 0));
+            // Set mmap usage (memory-mapped file I/O for SSD offloading)
+            LlamaBindings.MODEL_USE_MMAP.set(modelParams, 0L, (byte) (config.isUseMmap() ? 1 : 0));
 
-            // Set mlock usage (prevent swap for RAM-resident models)
-            LlamaBindings.MODEL_USE_MLOCK.set(modelParams, 0L, (byte) (modelConfig.isUseMlock() ? 1 : 0));
+            // Set mlock usage (prevent swapping for RAM-resident models)
+            LlamaBindings.MODEL_USE_MLOCK.set(modelParams, 0L, (byte) (config.isUseMlock() ? 1 : 0));
 
         } catch (Throwable t) {
             throw new RuntimeException("Failed to apply model config to model params", t);
@@ -143,7 +139,9 @@ public class LlamaModel implements AutoCloseable {
         return nVocab;
     }
 
-    public MemorySegment vocabPtr() { return vocabPtr; }
+    public MemorySegment vocabPtr() {
+        return vocabPtr;
+    }
 
     /**
      * Get training context size
@@ -396,8 +394,10 @@ public class LlamaModel implements AutoCloseable {
     @Override
     public void close() {
         try {
-            // Free the model
-            LlamaBindings.llama_model_free.invoke(modelPtr);
+            if (modelPtr != null && !modelPtr.equals(MemorySegment.NULL)) {
+                // Free the model
+                LlamaBindings.llama_model_free.invoke(modelPtr);
+            }
         } catch (Throwable t) {
             // Log but don't throw - we're in cleanup
             System.err.println("Warning: Failed to free model: " + t.getMessage());
