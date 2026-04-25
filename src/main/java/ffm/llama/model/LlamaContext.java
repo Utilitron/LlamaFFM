@@ -140,6 +140,22 @@ public class LlamaContext implements AutoCloseable {
     // ============================================================================
 
     /**
+     * Obtains a handle to the internal KV cache memory.
+     * May return NULL if the context hasn't been used yet or the memory
+     * subsystem isn't fully initialised.
+     */
+    private MemorySegment getMemoryHandle() {
+        try {
+            if (ctx == null || ctx.address() == 0) {
+                return MemorySegment.NULL;
+            }
+            return (MemorySegment) LlamaBindings.llama_get_memory.invoke(ctx);
+        } catch (Throwable t) {
+            throw new RuntimeException("Failed to obtain KV cache memory handle", t);
+        }
+    }
+
+    /**
      * Clear the entire KV cache
      * Use when starting a fresh conversation
      */
@@ -149,7 +165,7 @@ public class LlamaContext implements AutoCloseable {
             return;
         }
         try {
-            MemorySegment memHandle = (MemorySegment) LlamaBindings.llama_get_memory.invoke(this.ctx);
+            MemorySegment memHandle = getMemoryHandle();
 
             if (memHandle.equals(MemorySegment.NULL)) {
                 return;
@@ -257,7 +273,11 @@ public class LlamaContext implements AutoCloseable {
      */
     public int getMaxSequencePosition(int seqId) {
         try {
-            return (int) LlamaBindings.llama_memory_seq_pos_max.invokeExact(ctx, seqId);
+            MemorySegment memHandle = getMemoryHandle();
+            if (memHandle.equals(MemorySegment.NULL)) {
+                return -1;   // context not yet used
+            }
+            return (int) LlamaBindings.llama_memory_seq_pos_max.invokeExact(memHandle, seqId);
         } catch (Throwable t) {
             throw new RuntimeException("Failed to get max sequence position", t);
         }
@@ -473,8 +493,8 @@ public class LlamaContext implements AutoCloseable {
         System.out.println("GPU Layers:       " + modelConfig.getGpuLayers());
         System.out.println("KV on GPU:        " + modelConfig.isOffloadKvToGpu());
         System.out.println("Flash Attn:       " + modelConfig.isFlashAttention());
-        //System.out.println("Max Seq Pos:     " + getMaxSequencePosition(0));
-        //System.out.println("Est. KV Cache:   " + String.format("%.2f GB", estimateKvCacheUsageGB()));
+        System.out.println("Max Seq Pos:     " + getMaxSequencePosition(0));
+        System.out.println("Est. KV Cache:   " + String.format("%.2f GB", estimateKvCacheUsageGB()));
         System.out.println("=".repeat(60));
         System.out.println("\n\n");
     }
