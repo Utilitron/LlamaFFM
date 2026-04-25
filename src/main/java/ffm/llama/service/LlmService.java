@@ -7,6 +7,8 @@ import ffm.llama.message.*;
 import ffm.llama.model.LlamaBatch;
 import ffm.llama.model.LlamaContext;
 import ffm.llama.model.LlamaModel;
+import ffm.llama.model.state.CachedContextState;
+import ffm.llama.model.state.ContextStateManager;
 import ffm.llama.sampling.LlamaSampler;
 import ffm.llama.utils.TemplateDetector;
 import ffm.llama.utils.LlmToolGrammar;
@@ -32,23 +34,30 @@ public class LlmService implements AutoCloseable {
         LlamaBindings.init();
     }
 
-    // Model registry - maps model paths to loaded instances
+    // Model registry - maps model names to loaded instances
     private final Map<String, ModelInstance> loadedModels = new ConcurrentHashMap<>();
+
+    // Evicted state cache - stores KV cache snapshots in RAM
+    private final Map<String, CachedContextState> evictedStates = new ConcurrentHashMap<>();
 
     /**
      * Model instance wrapper
      */
-    private static class ModelInstance {
-        final LlamaModel model;
-        final LlamaContext context;
-        final ModelConfig modelConfig;
+    public static class ModelInstance {
+        public final LlamaModel model;
+        public final LlamaContext context;
+        public final ModelConfig modelConfig;
         long lastUsedMs;
+
+        // Track if this instance was restored from a cached state
+        boolean restoredFromCache;
 
         ModelInstance(LlamaModel model, LlamaContext context, ModelConfig modelConfig) {
             this.model = model;
             this.context = context;
             this.modelConfig = modelConfig;
             this.lastUsedMs = System.currentTimeMillis();
+            this.restoredFromCache = false;
         }
 
         void updateLastUsed() {
@@ -73,6 +82,7 @@ public class LlmService implements AutoCloseable {
 
     /**
      * Load a model with explicit model configuration
+     * Attempts to restore KV cache from evicted state if available and compatible.
      * 
      * @param modelPath Path to .gguf model file
      * @param modelConfig Model configuration (null = default settings)
@@ -80,8 +90,12 @@ public class LlmService implements AutoCloseable {
      */
     public String loadModel(String modelPath, ModelConfig modelConfig) {
         String modelName = Paths.get(modelPath).getFileName().toString();
+
         // Check if already loaded
         if (loadedModels.containsKey(modelName)) {
+            if (verbose) {
+                System.out.println("Model already loaded: " + modelName);
+            }
             return modelName;
         }
 
@@ -89,7 +103,7 @@ public class LlmService implements AutoCloseable {
             // Load model
             LlamaModel model = new LlamaModel(modelPath, modelConfig);
 
-            // default config if not provided
+            // Determine final config (use default if not provided)
             ModelConfig finalConfig = modelConfig;
             if (finalConfig == null) {
                 finalConfig = ModelConfig.Builder.create()
@@ -106,12 +120,39 @@ public class LlmService implements AutoCloseable {
             // Create context
             LlamaContext context = new LlamaContext(model, finalConfig);
 
+            // Check for cached state and restore if compatible
+            CachedContextState cachedState = evictedStates.get(modelPath);
+            boolean restored = false;
+
+            if (cachedState != null) {
+                if (cachedState.isCompatibleWith(modelPath, finalConfig)) {
+                    // Attempt to restore cached KV cache
+                    restored = ContextStateManager.restoreContext(context, cachedState);
+
+                    if (restored) {
+                        System.out.println(String.format("Restored KV cache for %s (%.2f MB, saved %d ms ago)", modelName, cachedState.getSizeMB(), cachedState.getAgeMs()));
+
+                        // Remove from cache after successful restore
+                        evictedStates.remove(modelPath);
+                    } else {
+                        System.err.println("Failed to restore cached state for " + modelName);
+                        // Discard incompatible/corrupted state
+                        evictedStates.remove(modelPath);
+                    }
+                } else {
+                    System.out.println("Cached state for " + modelName + " is incompatible with current config, discarding");
+                    evictedStates.remove(modelPath);
+                }
+            }
+
             // Register instance
             ModelInstance instance = new ModelInstance(model, context, finalConfig);
+            instance.restoredFromCache = restored;
             loadedModels.put(modelName, instance);
 
             System.out.println("Loaded model: " + modelName);
             if (verbose) {
+                System.out.println("Loaded model: " + modelName + (restored ? " [KV cache restored]" : ""));
                 model.printInfo();
                 context.printInfo();
             }
@@ -124,10 +165,14 @@ public class LlmService implements AutoCloseable {
     }
 
     /**
-     * Unload a model to free VRAM
+     * Unload a model and free its resources.
+     * Does NOT snapshot state (use evictLRU for that).
+     *
+     * @param modelPath Path to the model to unload
      */
     public void unloadModel(String modelPath) {
         String modelName = Paths.get(modelPath).getFileName().toString();
+
         ModelInstance instance = loadedModels.remove(modelName);
         if (instance != null) {
             instance.close();
@@ -296,7 +341,6 @@ public class LlmService implements AutoCloseable {
                 System.out.printf("[LlmService] Large prompt: %d tokens (batch=%d, ctx=%d)%n", promptTokens.length, batchSize, contextSize);
             }
 
-
             // Prefill phase - process prompt in batches
             int nCur = 0;
             while (nCur < promptTokens.length) {
@@ -379,6 +423,20 @@ public class LlmService implements AutoCloseable {
      * @return Embedding vector as float array
      */
     public float[] embed(String modelName, String text) {
+        return embed(modelName, text, false);
+    }
+
+    /**
+     * Generate embeddings for text
+     * Requires model loaded with embeddings=true in context params
+     * Automatically detects pooling type and uses appropriate strategy
+     *
+     * @param modelName Model identifier (should be embedding model like nomic-embed)
+     * @param text Text to embed
+     * @param truncate If true, silently truncates to fit context; otherwise throws on overflow
+     * @return Embedding vector as float array
+     */
+    public float[] embed(String modelName, String text, boolean truncate) {
         ModelInstance instance = loadedModels.get(modelName);
         if (instance == null) {
             throw new IllegalArgumentException("Model not loaded: " + modelName);
@@ -401,7 +459,23 @@ public class LlmService implements AutoCloseable {
             int poolingType = (int) LlamaBindings.llama_pooling_type.invokeExact(ctx.ptr());
             boolean isNone = poolingType == PoolingType.NONE.getValue();
 
+            // Hard limit = batch size
+            int maxTokens = ctx.getModelConfig().getBatchSize();
             int[] tokens = model.tokenize(text, true, false);
+
+            // Enforce limit
+            if (tokens.length > maxTokens) {
+                if (truncate) {
+                    // Truncate to maxTokens – keep the first maxTokens tokens
+                    tokens = Arrays.copyOf(tokens, maxTokens);
+                    if (verbose) {
+                        System.out.printf("[LlmService] Embedding truncated from %d to %d tokens%n", tokens.length, maxTokens);
+                    }
+                } else {
+                    throw new IllegalStateException(String.format("Text length %d tokens exceeds maximum %d. Use truncate=true or split the input.", tokens.length, maxTokens)
+                    );
+                }
+            }
 
             // Clear KV cache for fresh generation
             ctx.clearKvCache();
@@ -479,8 +553,41 @@ public class LlmService implements AutoCloseable {
     }
 
     /**
-     * Evict least recently used model if VRAM pressure is high
-     * Returns true if a model was evicted
+     * Evict a specific model, optionally saving its KV cache state.
+     *
+     * @param modelName The model identifier (filename)
+     * @return true if evicted, false if not loaded
+     */
+    public boolean evictModel(String modelName) {
+        ModelInstance instance = loadedModels.get(modelName);
+        if (instance == null) {
+            return false;
+        }
+
+        String modelPath = instance.model.getPath();
+
+        ContextStateManager.snapshotContext(instance).ifPresentOrElse(state -> {
+                evictedStates.put(modelPath, state);
+                if (verbose) {
+                    System.out.printf("[LlmService] KV snapshot saved for %s (%.2f MB)%n", modelName, state.getSizeMB());
+                }
+            }, () -> System.err.println("[LlmService] Failed to snapshot " + modelName)
+        );
+
+        loadedModels.remove(modelName);
+        instance.close();
+
+        if (verbose) {
+            System.out.println("Evicted model: " + modelName);
+        }
+        return true;
+    }
+
+
+    /**
+     * Evict least recently used model with KV cache snapshot.
+     *
+     * @return true if a model was evicted, false if no models loaded
      */
     public boolean evictLRU() {
         if (loadedModels.isEmpty()) {
@@ -488,18 +595,57 @@ public class LlmService implements AutoCloseable {
         }
 
         // Find LRU model
-        ModelInstance lru = loadedModels.values().stream()
-                .min(Comparator.comparingLong(inst -> inst.lastUsedMs))
+        Map.Entry<String, ModelInstance> lruEntry = loadedModels.entrySet().stream()
+                .min(Comparator.comparingLong(e -> e.getValue().lastUsedMs))
                 .orElse(null);
 
-        String path = lru.model.getPath();
-        unloadModel(path);
-        return true;
+        if (lruEntry == null) {
+            return false;
+        }
 
+        String modelName = lruEntry.getKey();
+
+        return evictModel(modelName);
     }
 
     /**
-     * Enable or disable verbose console output (model loading info, etc.)
+     * Get information about cached states
+     */
+    public Map<String, CachedContextState> getEvictedStates() {
+        return new HashMap<>(evictedStates);
+    }
+
+    /**
+     * Manually clear all cached states to free RAM
+     */
+    public void clearEvictedStates() {
+        int count = evictedStates.size();
+        evictedStates.clear();
+
+        if (verbose) {
+            System.out.printf("Cleared " + count + " cached states");
+        }
+    }
+
+    /**
+     * Manually clear a specific cached state
+     */
+    public boolean clearEvictedState(String modelPath) {
+        CachedContextState removed = evictedStates.remove(modelPath);
+        return removed != null;
+    }
+
+    /**
+     * Get total memory used by cached states
+     */
+    public double getTotalCachedStateSizeMB() {
+        return evictedStates.values().stream()
+            .mapToDouble(CachedContextState::getSizeMB)
+            .sum();
+    }
+
+    /**
+     * Enable or disable verbose console output
      */
     public void setVerbose(boolean verbose) {
         this.verbose = verbose;
@@ -510,17 +656,44 @@ public class LlmService implements AutoCloseable {
     }
 
     /**
-     * Print service status
+     * Get all loaded models
+     */
+    public Set<String> getLoadedModelNames() {
+        return new HashSet<>(loadedModels.keySet());
+    }
+
+    /**
+     * Print service status including cached states
      */
     public void printStatus() {
         System.out.println("=".repeat(60));
-        System.out.println("LLM Service Status");
+        System.out.println("LLM Service Status (Enhanced with KV Cache Persistence)");
         System.out.println("=".repeat(60));
-        System.out.println("Loaded Models:    " + loadedModels.size());
+        System.out.println("Loaded Models:       " + loadedModels.size());
+        System.out.println("Cached States:       " + evictedStates.size());
+        System.out.println("Cached State Memory: " + String.format("%.2f MB", getTotalCachedStateSizeMB()));
         System.out.println("-".repeat(60));
 
-        for (ModelInfo info : getLoadedModels()) {
-            System.out.println(info);
+        // Show loaded models
+        for (Map.Entry<String, ModelInstance> entry : loadedModels.entrySet()) {
+            ModelInstance inst = entry.getValue();
+            System.out.println(String.format(
+                "  [LOADED] %s %s(age: %d ms)",
+                entry.getKey(),
+                inst.restoredFromCache ? "[RESTORED] " : "",
+                System.currentTimeMillis() - inst.lastUsedMs
+            ));
+        }
+
+        // Show cached states
+        for (Map.Entry<String, CachedContextState> entry : evictedStates.entrySet()) {
+            CachedContextState state = entry.getValue();
+            System.out.println(String.format(
+                "  [CACHED] %s (%.2f MB, age: %d ms)",
+                Paths.get(entry.getKey()).getFileName(),
+                state.getSizeMB(),
+                state.getAgeMs()
+            ));
         }
 
         System.out.println("=".repeat(60));
@@ -529,8 +702,16 @@ public class LlmService implements AutoCloseable {
     @Override
     public void close() {
         // Unload all models
-        new ArrayList<>(loadedModels.keySet()).forEach(this::unloadModel);
-        
+        new ArrayList<>(loadedModels.keySet()).forEach(name -> {
+            ModelInstance inst = loadedModels.remove(name);
+            if (inst != null) {
+                inst.close();
+            }
+        });
+
+        // Clear cached states
+        evictedStates.clear();
+
         // Free backend
         LlamaBindings.free();
     }
