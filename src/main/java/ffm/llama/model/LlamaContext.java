@@ -4,7 +4,6 @@ import ffm.llama.binding.LlamaBindings;
 import ffm.llama.config.ModelConfig;
 
 import java.lang.foreign.*;
-import java.nio.file.Paths;
 
 /**
  * Represents a llama.cpp inference context with model configuration.
@@ -57,9 +56,7 @@ public class LlamaContext implements AutoCloseable {
             applyModelConfigToContextParams(contextParams);
 
             // Create context
-            this.ctx = (MemorySegment) LlamaBindings.llama_init_from_model.invoke(
-                    model.ptr(), contextParams
-            );
+            this.ctx = (MemorySegment) LlamaBindings.llama_init_from_model.invoke(model.ptr(), contextParams);
 
             if (ctx == MemorySegment.NULL) {
                 contextArena.close();
@@ -317,9 +314,7 @@ public class LlamaContext implements AutoCloseable {
             MemorySegment pathSeg = tempArena.allocateFrom(filePath);
             MemorySegment tokens = MemorySegment.NULL; // Save all tokens
             
-            return (long) LlamaBindings.llama_state_seq_save_file.invoke(
-                    ctx, pathSeg, seqId, tokens, 0L
-            );
+            return (long) LlamaBindings.llama_state_seq_save_file.invoke(ctx, pathSeg, seqId, tokens, 0L);
         } catch (Throwable t) {
             throw new RuntimeException("Failed to save sequence to file", t);
         }
@@ -334,9 +329,7 @@ public class LlamaContext implements AutoCloseable {
             MemorySegment pathSeg = tempArena.allocateFrom(filePath);
             MemorySegment tokens = MemorySegment.NULL; // Load all tokens
             
-            return (long) LlamaBindings.llama_state_seq_load_file.invoke(
-                    ctx, pathSeg, seqId, tokens, 0L
-            );
+            return (long) LlamaBindings.llama_state_seq_load_file.invoke(ctx, pathSeg, seqId, tokens, 0L);
         } catch (Throwable t) {
             throw new RuntimeException("Failed to load sequence from file", t);
         }
