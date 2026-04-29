@@ -6,63 +6,89 @@ import ffm.llama.enums.KVCacheType;
  * Configuration for LLM Model
  */
 public class ModelConfig {
-
-    // ============================================================================
-    // CONFIGURATION FIELDS
-    // ============================================================================
-
-    /** Number of layers to offload to GPU (Tier 0) */
+    
+    /**
+     * Number of layers to offload to GPU (0 = CPU only).
+     */
     private final int gpuLayers;
-
-    /** Whether to offload KV cache to GPU */
+    
+    /**
+     * Whether to offload the entire KV cache to GPU.
+     */
     private final boolean offloadKvToGpu;
-
-    /** Use memory mapping for model loading (critical for Tier 2) */
+    
+    /**
+     * Use memory mapping for model loading. Recommended for large models on SSD
+     */
     private final boolean useMmap;
-
-    /** Lock model in RAM to prevent swap to disk */
+    
+    /**
+     * Lock model pages in RAM to prevent swapping to disk.
+     */
     private final boolean useMlock;
-
-    /** Maximum context size in tokens */
+    
+    /**
+     * Maximum context size in tokens.
+     */
     private final int contextSize;
-
-    /** Batch size for prompt processing (prefill phase) */
+    
+    /**
+     * Batch size for prompt processing (prefill phase).
+     */
     private final int batchSize;
-
-    /** Number of CPU threads for offloaded layers */
+    
+    /**
+     * Number of CPU threads used for inference on CPU‑resident layers.
+     */
     private final int cpuThreads;
-
-    /** Defragmentation threshold for KV cache (0.0 = disabled, 0.1 = aggressive) */
+    
+    /**
+     * Defragmentation threshold for KV cache (0.0 = disabled, 0.1 = aggressive)
+     */
     private final float defragThreshold;
-
-    /** Enable flash attention (reduces memory, increases compute) */
+    
+    /**
+     * Enable flash attention (reduces memory, increases compute)
+     */
     private final boolean flashAttention;
-
-    /** Enable embeddings */
+    
+    /**
+     * Enable embeddings
+     */
     private final boolean embeddings;
-
-    /** Key cache precision */
+    
+    /**
+     * Key cache precision
+     */
     private final KVCacheType cacheTypeK;
-
-    /** Value cache precision */
+    
+    /**
+     * Value cache precision
+     */
     private final KVCacheType cacheTypeV;
-
-    /** Optional JSON schema for constrained decoding */
+    
+    /**
+     * Optional JSON schema for constrained decoding (sets enableGrammar automatically).
+     */
     private final String jsonSchema;
-
-    /** Enable GBNF grammar enforcement */
+    
+    /**
+     * Enable GBNF grammar enforcement.
+     */
     private final boolean enableGrammar;
-
+    
+    /**
+     * Enable dynamic attention sharpening to mitigate quantization noise in extreme compression.
+     * Formula: α(N) = 1 + c × √(ln N)
+     */
     private final boolean dynamicAttentionSharpening;
-
+    
+    /**
+     * Sharpening factor {@code c} in the dynamic attention formula {@code α(N) = 1 + c × √(ln N)}.
+     * Valid range: [0.0, 1.0].
+     */
     private final double attentionSharpeningFactor;  // c in α(N) = 1 + c × √(ln N)
-
-
-
-    // ============================================================================
-    // CONSTRUCTORS
-    // ============================================================================
-
+    
     private ModelConfig(Builder builder) {
         this.gpuLayers = builder.gpuLayers;
         this.offloadKvToGpu = builder.offloadKvToGpu;
@@ -81,11 +107,7 @@ public class ModelConfig {
         this.dynamicAttentionSharpening = builder.dynamicAttentionSharpening;
         this.attentionSharpeningFactor = builder.attentionSharpeningFactor;
     }
-
-    // ============================================================================
-    // BUILDER PATTERN
-    // ============================================================================
-
+    
     /**
      * Create a sensible default configuration
      * Designed for consumer-grade hardware with balanced performance
@@ -104,10 +126,12 @@ public class ModelConfig {
                 .cacheTypeV(KVCacheType.F16)
                 .build();
     }
-
+    
     /**
      * Optimized for long-context RAG on consumer GPUs
      * Uses asymmetric TurboQuant: K=q8_0 (preserve positions), V=tq3_0 (aggressive)
+     *
+     * @return configuration suitable for 32K context RAG pipelines
      */
     public static ModelConfig longContextConsumer() {
         return Builder.create()
@@ -122,10 +146,12 @@ public class ModelConfig {
                 .attentionSharpeningFactor(0.1)
                 .build();
     }
-
+    
     /**
-     * Extreme memory savings for 128K+ contexts
-     * Uses full TurboQuant pipeline with QJL error correction
+     * Extreme memory‑saving preset for 128K+ contexts.
+     * Uses full TurboQuant pipeline with QJL error correction (~3.0 bits per value).
+     *
+     * @return highly compressed configuration for very long contexts
      */
     public static ModelConfig extremeCompression() {
         return Builder.create()
@@ -140,7 +166,98 @@ public class ModelConfig {
                 .attentionSharpeningFactor(0.15)    // Higher for extreme compression
                 .build();
     }
-
+    
+    /**
+     * Calculate estimated KV cache size in GB for given context
+     * Formula: n_ctx * n_layers * n_embd * 2 (K+V) * bytes_per_element
+     * Assumes FP16 KV cache (2 bytes per element)
+     *
+     * @param nCtx    context size in tokens
+     * @param nLayers number of transformer layers
+     * @param nEmbd   embedding dimensionality
+     * @return estimated memory in gigabytes
+     */
+    public static double estimateKvCacheSizeGB(int nCtx, int nLayers, int nEmbd) {
+        long totalElements = (long) nCtx * nLayers * nEmbd * 2; // K + V
+        long totalBytes = totalElements * 2; // FP16 = 2 bytes
+        return totalBytes / 1_000_000_000.0;
+    }
+    
+    public int getGpuLayers() {
+        return gpuLayers;
+    }
+    
+    public boolean isOffloadKvToGpu() {
+        return offloadKvToGpu;
+    }
+    
+    public boolean isUseMmap() {
+        return useMmap;
+    }
+    
+    public boolean isUseMlock() {
+        return useMlock;
+    }
+    
+    public int getContextSize() {
+        return contextSize;
+    }
+    
+    public int getBatchSize() {
+        return batchSize;
+    }
+    
+    public int getCpuThreads() {
+        return cpuThreads;
+    }
+    
+    public float getDefragThreshold() {
+        return defragThreshold;
+    }
+    
+    public boolean isFlashAttention() {
+        return flashAttention;
+    }
+    
+    public boolean isEmbeddings() {
+        return embeddings;
+    }
+    
+    public KVCacheType getCacheTypeK() {
+        return cacheTypeK;
+    }
+    
+    public KVCacheType getCacheTypeV() {
+        return cacheTypeV;
+    }
+    
+    public String getJsonSchema() {
+        return jsonSchema;
+    }
+    
+    public boolean isEnableGrammar() {
+        return enableGrammar;
+    }
+    
+    public boolean isDynamicAttentionSharpening() {
+        return dynamicAttentionSharpening;
+    }
+    
+    public double getAttentionSharpeningFactor() {
+        return attentionSharpeningFactor;
+    }
+    
+    @Override
+    public String toString() {
+        return String.format(
+                "ModelConfig[gpu_layers=%d, kv_gpu=%b, ctx=%d, batch=%d, threads=%d, defrag=%.2f, flash=%b, cacheK=%s, cacheV=%s, grammar=%b, dynAttn=%b]",
+                gpuLayers, offloadKvToGpu, contextSize, batchSize, cpuThreads, defragThreshold, flashAttention, cacheTypeK.name(), cacheTypeV.name(), enableGrammar, dynamicAttentionSharpening
+        );
+    }
+    
+    /**
+     * Builder for {@link ModelConfig} with fluent setter methods.
+     */
     public static class Builder {
         private int gpuLayers = 0;
         private boolean offloadKvToGpu = false;
@@ -158,95 +275,95 @@ public class ModelConfig {
         private boolean enableGrammar = false;
         private boolean dynamicAttentionSharpening = false;
         private double attentionSharpeningFactor = 0.1;
-
+        
         private Builder() {}
-
+        
         public static Builder create() {
             return new Builder();
         }
-
+        
         public Builder gpuLayers(int gpuLayers) {
             this.gpuLayers = gpuLayers;
             return this;
         }
-
+        
         public Builder offloadKvToGpu(boolean offloadKvToGpu) {
             this.offloadKvToGpu = offloadKvToGpu;
             return this;
         }
-
+        
         public Builder useMmap(boolean useMmap) {
             this.useMmap = useMmap;
             return this;
         }
-
+        
         public Builder useMlock(boolean useMlock) {
             this.useMlock = useMlock;
             return this;
         }
-
+        
         public Builder contextSize(int contextSize) {
             this.contextSize = contextSize;
             return this;
         }
-
+        
         public Builder batchSize(int batchSize) {
             this.batchSize = batchSize;
             return this;
         }
-
+        
         public Builder cpuThreads(int cpuThreads) {
             this.cpuThreads = cpuThreads;
             return this;
         }
-
+        
         public Builder defragThreshold(float defragThreshold) {
             this.defragThreshold = defragThreshold;
             return this;
         }
-
+        
         public Builder flashAttention(boolean flashAttention) {
             this.flashAttention = flashAttention;
             return this;
         }
-
+        
         public Builder embeddings(boolean embeddings) {
             this.embeddings = embeddings;
             return this;
         }
-
+        
         public Builder cacheTypeK(KVCacheType cacheType) {
             this.cacheTypeK = cacheType;
             return this;
         }
-
+        
         public Builder cacheTypeV(KVCacheType cacheType) {
             this.cacheTypeV = cacheType;
             return this;
         }
-
+        
         public Builder cacheType(KVCacheType cacheType) {
             this.cacheTypeK = cacheType;
             this.cacheTypeV = cacheType;
             return this;
         }
-
+        
         public Builder jsonSchema(String schema) {
             this.jsonSchema = schema;
             this.enableGrammar = (schema != null);
             return this;
         }
-
+        
         public Builder enableGrammar(boolean enable) {
             this.enableGrammar = enable;
             return this;
         }
-
+        
         public Builder dynamicAttentionSharpening(boolean enable) {
             this.dynamicAttentionSharpening = enable;
             return this;
         }
-
+        
         public Builder attentionSharpeningFactor(double factor) {
             if (factor < 0 || factor > 1.0) {
                 throw new IllegalArgumentException("Sharpening factor must be between 0 and 1.0");
@@ -254,54 +371,9 @@ public class ModelConfig {
             this.attentionSharpeningFactor = factor;
             return this;
         }
-
+        
         public ModelConfig build() {
             return new ModelConfig(this);
         }
-    }
-
-    // ============================================================================
-    // GETTERS
-    // ============================================================================
-
-    public int getGpuLayers() { return gpuLayers;}
-    public boolean isOffloadKvToGpu() { return offloadKvToGpu;}
-    public boolean isUseMmap() { return useMmap;}
-    public boolean isUseMlock() { return useMlock;}
-    public int getContextSize() { return contextSize;}
-    public int getBatchSize() { return batchSize;}
-    public int getCpuThreads() { return cpuThreads;}
-    public float getDefragThreshold() { return defragThreshold;}
-    public boolean isFlashAttention() { return flashAttention; }
-    public boolean isEmbeddings() { return embeddings; }
-    public KVCacheType getCacheTypeK() { return cacheTypeK; }
-    public KVCacheType getCacheTypeV() { return cacheTypeV; }
-    public String getJsonSchema() { return jsonSchema; }
-    public boolean isEnableGrammar() { return enableGrammar; }
-    public boolean isDynamicAttentionSharpening() { return dynamicAttentionSharpening; }
-    public double getAttentionSharpeningFactor() { return attentionSharpeningFactor; }
-
-
-    // ============================================================================
-    // UTILITIES
-    // ============================================================================
-
-    /**
-     * Calculate estimated KV cache size in GB for given context
-     * Formula: n_ctx * n_layers * n_embd * 2 (K+V) * bytes_per_element
-     * Assumes FP16 KV cache (2 bytes per element)
-     */
-    public static double estimateKvCacheSizeGB(int nCtx, int nLayers, int nEmbd) {
-        long totalElements = (long) nCtx * nLayers * nEmbd * 2; // K + V
-        long totalBytes = totalElements * 2; // FP16 = 2 bytes
-        return totalBytes / 1_000_000_000.0;
-    }
-
-    @Override
-    public String toString() {
-        return String.format(
-                "ModelConfig[gpu_layers=%d, kv_gpu=%b, ctx=%d, batch=%d, threads=%d, defrag=%.2f, flash=%b, cacheK=%s, cacheV=%s, grammar=%b, dynAttn=%b]",
-                gpuLayers, offloadKvToGpu, contextSize, batchSize, cpuThreads, defragThreshold, flashAttention, cacheTypeK.name(), cacheTypeV.name(), enableGrammar, dynamicAttentionSharpening
-        );
     }
 }

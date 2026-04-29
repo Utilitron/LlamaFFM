@@ -4,18 +4,18 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Unit tests for {@link PoolingType}.
  * Focuses on the {@code fromValue} lookup contract.
  */
 class PoolingTypeTest {
-
+    
     @Nested
     @DisplayName("fromValue lookup")
     class FromValueLookup {
-
+        
         @Test
         @DisplayName("Should map known values to correct enum constant")
         void shouldMapKnownValues() {
@@ -26,7 +26,7 @@ class PoolingTypeTest {
             assertEquals(PoolingType.RANK, PoolingType.fromValue(4));
             assertEquals(PoolingType.UNSPECIFIED, PoolingType.fromValue(-1));
         }
-
+        
         @Test
         @DisplayName("Should return UNSPECIFIED for unknown values")
         void shouldReturnUnspecifiedForUnknown() {
@@ -34,7 +34,7 @@ class PoolingTypeTest {
             assertEquals(PoolingType.UNSPECIFIED, PoolingType.fromValue(Integer.MIN_VALUE));
             assertEquals(PoolingType.UNSPECIFIED, PoolingType.fromValue(Integer.MAX_VALUE));
         }
-
+        
         @Test
         @DisplayName("Should return UNSPECIFIED for negative values except -1")
         void shouldReturnUnspecifiedForNegativeValues() {
@@ -42,11 +42,11 @@ class PoolingTypeTest {
             assertEquals(PoolingType.UNSPECIFIED, PoolingType.fromValue(-100));
         }
     }
-
+    
     @Nested
     @DisplayName("value getter")
     class ValueGetter {
-
+        
         @Test
         @DisplayName("Should return the correct int value for each constant")
         void shouldReturnCorrectValue() {

@@ -29,7 +29,7 @@ public enum MessageRole {
     
     /**
      * Private constructor.
-     * 
+     *
      * @param value String representation used in templates
      */
     MessageRole(String value) {
@@ -37,17 +37,8 @@ public enum MessageRole {
     }
     
     /**
-     * Get the string value for this role (used in prompt templates).
-     * 
-     * @return Role string (e.g., "system", "user", "assistant", "tool")
-     */
-    public String getValue() {
-        return value;
-    }
-    
-    /**
      * Parse a string into a MessageRole enum.
-     * 
+     *
      * @param value Role string (case-insensitive)
      * @return Corresponding MessageRole
      * @throws IllegalArgumentException if the string doesn't match any role
@@ -63,10 +54,16 @@ public enum MessageRole {
             }
         }
         
-        throw new IllegalArgumentException(
-            "Unknown message role: '" + value + "'. " +
-            "Valid roles are: system, user, assistant, tool"
-        );
+        throw new IllegalArgumentException("Unknown message role: '" + value + "'. " + "Valid roles are: system, user, assistant, tool");
+    }
+    
+    /**
+     * Get the string value for this role (used in prompt templates).
+     *
+     * @return Role string (e.g., "system", "user", "assistant", "tool")
+     */
+    public String getValue() {
+        return value;
     }
     
     /**

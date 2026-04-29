@@ -1,10 +1,61 @@
 package ffm.llama.utils;
 
-import java.util.*;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.function.Predicate;
 
 public class TemplateDetector {
-
+    
+    public static String getTemplateName(String template) {
+        return detectTemplate(template).getName();
+    }
+    
+    public static LlmChatTemplate detectTemplate(String template) {
+        if (template == null || template.isEmpty()) return LlmChatTemplate.UNKNOWN;
+        
+        Predicate<String> contains = template::contains;
+        
+        // Logic sorted by specificity to avoid false positives
+        if (contains.test("<|im_start|>")) {
+            if (contains.test("<|im_sep|>")) return LlmChatTemplate.PHI_4;
+            if (contains.test("<end_of_utterance>")) return LlmChatTemplate.SMOLVLM;
+            return LlmChatTemplate.CHATML;
+        }
+        
+        if (template.startsWith("mistral") || contains.test("[INST]")) {
+            if (contains.test("[SYSTEM_PROMPT]")) return LlmChatTemplate.MISTRAL_V7;
+            if (contains.test("' [INST] ' + system_message") || contains.test("[AVAILABLE_TOOLS]")) {
+                if (contains.test(" [INST]")) return LlmChatTemplate.MISTRAL_V1;
+                if (contains.test("\"[INST]\"")) return LlmChatTemplate.MISTRAL_V3_TEKKEN;
+                return LlmChatTemplate.MISTRAL_V3;
+            }
+            // Llama 2 style fallbacks
+            if (contains.test("content.strip()")) return LlmChatTemplate.LLAMA_2_SYS_STRIP;
+            if (contains.test("bos_token + '[INST]")) return LlmChatTemplate.LLAMA_2_SYS_BOS;
+            if (contains.test("<<SYS>>")) return LlmChatTemplate.LLAMA_2_SYS;
+            return LlmChatTemplate.LLAMA_2;
+        }
+        
+        if (contains.test("<|start_header_id|>")) return LlmChatTemplate.LLAMA_3;
+        if (contains.test("<|header_start|>")) return LlmChatTemplate.LLAMA4;
+        if (contains.test("<|assistant|>") && contains.test("<|end|>")) return LlmChatTemplate.PHI_3;
+        if (contains.test("<start_of_turn>")) return LlmChatTemplate.GEMMA;
+        if (contains.test("<|START_OF_TURN_TOKEN|>")) return LlmChatTemplate.COMMAND_R;
+        
+        // DeepSeek Check
+        if (contains.test("<｜Assistant｜>") || contains.test("<｜User｜>")) {
+            return contains.test("<｜Assistant｜>") ? LlmChatTemplate.DEEPSEEK_3 : LlmChatTemplate.DEEPSEEK_2;
+        }
+        
+        // Granite Check
+        if (contains.test("<|start_of_role|>")) {
+            return (contains.test("<tool_call>") || contains.test("<tools>"))
+                    ? LlmChatTemplate.GRANITE_4_0 : LlmChatTemplate.GRANITE_3_X;
+        }
+        
+        return LlmChatTemplate.UNKNOWN;
+    }
+    
     public enum LlmChatTemplate {
         UNKNOWN("unknown"),
         CHATML("chatml"),
@@ -61,81 +112,32 @@ public class TemplateDetector {
         GROK_2("grok-2"),
         PANGU_EMBED("pangu-embedded"),
         SOLAR_OPEN("solar-open");
-
-        private final String name;
+        
         private static final Map<String, LlmChatTemplate> BY_NAME = new HashMap<>();
-
+        
         static {
             for (LlmChatTemplate t : values()) {
                 BY_NAME.put(t.name, t);
             }
         }
-
+        
+        private final String name;
+        
         LlmChatTemplate(String name) {
             this.name = name;
         }
-
-        public String getName() {
-            return name;
-        }
-
+        
         public static LlmChatTemplate fromString(String text) {
             return BY_NAME.getOrDefault(text, UNKNOWN);
         }
-
+        
+        public String getName() {
+            return name;
+        }
+        
         @Override
         public String toString() {
             return name;
         }
-    }
-
-    public static String getTemplateName(String template) {
-        return detectTemplate(template).getName();
-    }
-
-    public static LlmChatTemplate detectTemplate(String template) {
-        if (template == null || template.isEmpty()) return LlmChatTemplate.UNKNOWN;
-
-        Predicate<String> contains = template::contains;
-
-        // Logic sorted by specificity to avoid false positives
-        if (contains.test("<|im_start|>")) {
-            if (contains.test("<|im_sep|>")) return LlmChatTemplate.PHI_4;
-            if (contains.test("<end_of_utterance>")) return LlmChatTemplate.SMOLVLM;
-            return LlmChatTemplate.CHATML;
-        }
-
-        if (template.startsWith("mistral") || contains.test("[INST]")) {
-            if (contains.test("[SYSTEM_PROMPT]")) return LlmChatTemplate.MISTRAL_V7;
-            if (contains.test("' [INST] ' + system_message") || contains.test("[AVAILABLE_TOOLS]")) {
-                if (contains.test(" [INST]")) return LlmChatTemplate.MISTRAL_V1;
-                if (contains.test("\"[INST]\"")) return LlmChatTemplate.MISTRAL_V3_TEKKEN;
-                return LlmChatTemplate.MISTRAL_V3;
-            }
-            // Llama 2 style fallbacks
-            if (contains.test("content.strip()")) return LlmChatTemplate.LLAMA_2_SYS_STRIP;
-            if (contains.test("bos_token + '[INST]")) return LlmChatTemplate.LLAMA_2_SYS_BOS;
-            if (contains.test("<<SYS>>")) return LlmChatTemplate.LLAMA_2_SYS;
-            return LlmChatTemplate.LLAMA_2;
-        }
-
-        if (contains.test("<|start_header_id|>")) return LlmChatTemplate.LLAMA_3;
-        if (contains.test("<|header_start|>")) return LlmChatTemplate.LLAMA4;
-        if (contains.test("<|assistant|>") && contains.test("<|end|>")) return LlmChatTemplate.PHI_3;
-        if (contains.test("<start_of_turn>")) return LlmChatTemplate.GEMMA;
-        if (contains.test("<|START_OF_TURN_TOKEN|>")) return LlmChatTemplate.COMMAND_R;
-
-        // DeepSeek Check
-        if (contains.test("<｜Assistant｜>") || contains.test("<｜User｜>")) {
-            return contains.test("<｜Assistant｜>") ? LlmChatTemplate.DEEPSEEK_3 : LlmChatTemplate.DEEPSEEK_2;
-        }
-
-        // Granite Check
-        if (contains.test("<|start_of_role|>")) {
-            return (contains.test("<tool_call>") || contains.test("<tools>"))
-                    ? LlmChatTemplate.GRANITE_4_0 : LlmChatTemplate.GRANITE_3_X;
-        }
-
-        return LlmChatTemplate.UNKNOWN;
     }
 }
