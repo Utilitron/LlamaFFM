@@ -12,11 +12,11 @@ import static org.junit.jupiter.api.Assertions.*;
  * and documents behavioural boundaries (including overflow/zero cases).
  */
 class KVCacheTypeTest {
-
+    
     @Nested
     @DisplayName("Constant metadata")
     class ConstantMetadata {
-
+        
         @Test
         @DisplayName("Should have correct llamaCppName for each type")
         void shouldHaveCorrectLlamaCppName() {
@@ -27,7 +27,7 @@ class KVCacheTypeTest {
             assertEquals("tbqx3", KVCacheType.TBQX3.getLlamaCppName());
             assertEquals("tbqp3", KVCacheType.TBQP3.getLlamaCppName());
         }
-
+        
         @Test
         @DisplayName("Should have correct nativeId for each type")
         void shouldHaveCorrectNativeId() {
@@ -38,7 +38,7 @@ class KVCacheTypeTest {
             assertEquals(43, KVCacheType.TBQX3.getNativeId());
             assertEquals(44, KVCacheType.TBQP3.getNativeId());
         }
-
+        
         @Test
         @DisplayName("Should have correct bitsPerWeight")
         void shouldHaveCorrectBitsPerWeight() {
@@ -49,7 +49,7 @@ class KVCacheTypeTest {
             assertEquals(3.5, KVCacheType.TBQX3.getBitsPerWeight(), 0.01);
             assertEquals(3.0, KVCacheType.TBQP3.getBitsPerWeight(), 0.01);
         }
-
+        
         @Test
         @DisplayName("Should have correct compression ratio")
         void shouldHaveCorrectCompressionRatio() {
@@ -61,18 +61,18 @@ class KVCacheTypeTest {
             assertEquals(5.2, KVCacheType.TBQP3.getCompressionRatio(), 0.01);
         }
     }
-
+    
     @Nested
     @DisplayName("estimateVramSavingsMB method")
     class EstimateVramSavingsMB {
-
+        
         @Test
         @DisplayName("Should return 0 for FP16 (no savings)")
         void f16ShouldReturnZeroSavings() {
             long savings = KVCacheType.F16.estimateVramSavingsMB(32768, 8);
             assertEquals(0L, savings);
         }
-
+        
         @Test
         @DisplayName("Should return positive savings for compressed types")
         void compressedTypesShouldReturnPositiveSavings() {
@@ -80,7 +80,7 @@ class KVCacheTypeTest {
             assertTrue(KVCacheType.Q4_0.estimateVramSavingsMB(32768, 8) > 0);
             assertTrue(KVCacheType.TQ3_0.estimateVramSavingsMB(32768, 8) > 0);
         }
-
+        
         @Test
         @DisplayName("Should be monotonic: higher compression gives larger savings")
         void higherCompressionShouldGiveLargerSavings() {
@@ -90,7 +90,7 @@ class KVCacheTypeTest {
             assertTrue(savingsQ4 > savingsQ8);
             assertTrue(savingsTQ > savingsQ4);
         }
-
+        
         @Test
         @DisplayName("Should scale linearly with context length")
         void shouldScaleWithContextLength() {
@@ -98,13 +98,13 @@ class KVCacheTypeTest {
             long scaled = KVCacheType.Q4_0.estimateVramSavingsMB(32768, 8);
             assertEquals(base * 2, scaled, base * 0.01); // within 1% of base
         }
-
+        
         @Test
         @DisplayName("Should return 0 for zero context length")
         void zeroContextShouldReturnZero() {
             assertEquals(0L, KVCacheType.Q8_0.estimateVramSavingsMB(0, 8));
         }
-
+        
         @Test
         @DisplayName("Should handle unknown model sizes gracefully")
         void shouldHandleUnknownModelSize() {
@@ -114,7 +114,7 @@ class KVCacheTypeTest {
             // sanity: not larger than an absurd amount
             assertTrue(savings < 100_000, "Savings should be reasonable");
         }
-
+        
         @Test
         @DisplayName("Should not crash for negative context length (current behaviour)")
         void negativeContextShouldNotCrash() {

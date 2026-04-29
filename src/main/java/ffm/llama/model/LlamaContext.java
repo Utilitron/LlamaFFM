@@ -3,36 +3,37 @@ package ffm.llama.model;
 import ffm.llama.binding.LlamaBindings;
 import ffm.llama.config.ModelConfig;
 
-import java.lang.foreign.*;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 
 /**
  * Represents a llama.cpp inference context with model configuration.
  * Manages KV cache, batch processing, and performance monitoring.
  */
 public class LlamaContext implements AutoCloseable {
-
+    
     private final MemorySegment ctx;
     private final LlamaModel model;
     private final ModelConfig modelConfig;
     private final Arena contextArena;
-
+    
     /**
      * Create a new context with default model configuration
      */
     public LlamaContext(LlamaModel model) {
         this(model, null);
     }
-
+    
     /**
      * Create a new context with explicit model configuration
-     * 
-     * @param model The loaded model
+     *
+     * @param model       The loaded model
      * @param modelConfig Model configuration (null = use model's config)
      */
     public LlamaContext(LlamaModel model, ModelConfig modelConfig) {
         this.model = model;
         this.contextArena = Arena.ofShared();
-
+        
         // Determine model config to use
         if (modelConfig != null) {
             this.modelConfig = modelConfig;
@@ -41,7 +42,7 @@ public class LlamaContext implements AutoCloseable {
         } else {
             throw new IllegalStateException("Model configuration could not be determined");
         }
-
+        
         try {
             // Create context parameters struct
             MemorySegment contextParams = contextArena.allocate(LlamaBindings.CONTEXT_PARAMS_LAYOUT);
@@ -51,24 +52,24 @@ public class LlamaContext implements AutoCloseable {
             
             // Copy defaults to our arena
             MemorySegment.copy(defaultParams, 0, contextParams, 0, LlamaBindings.CONTEXT_PARAMS_LAYOUT.byteSize());
-
+            
             // Apply model configuration
             applyModelConfigToContextParams(contextParams);
-
+            
             // Create context
             this.ctx = (MemorySegment) LlamaBindings.llama_init_from_model.invoke(model.ptr(), contextParams);
-
+            
             if (ctx == MemorySegment.NULL) {
                 contextArena.close();
                 throw new RuntimeException("Failed to create context");
             }
-
+            
         } catch (Throwable t) {
             contextArena.close();
             throw new RuntimeException("Failed to create context", t);
         }
     }
-
+    
     /**
      * Apply model configuration to context parameters struct
      */
@@ -76,69 +77,69 @@ public class LlamaContext implements AutoCloseable {
         try {
             // Context size
             LlamaBindings.CONTEXT_N_CTX.set(contextParams, 0L, modelConfig.getContextSize());
-
+            
             // Batch size
             LlamaBindings.CONTEXT_N_BATCH.set(contextParams, 0L, modelConfig.getBatchSize());
-
+            
             // Physical batch size
             LlamaBindings.CONTEXT_N_UBATCH.set(contextParams, 0L, Math.min(512, modelConfig.getBatchSize()));
-
+            
             // CPU threads
             LlamaBindings.CONTEXT_N_THREADS.set(contextParams, 0L, modelConfig.getCpuThreads());
-
+            
             // Batch threads
             LlamaBindings.CONTEXT_N_THREADS_BATCH.set(contextParams, 0L, modelConfig.getCpuThreads());
-
+            
             // KV cache offloading
             LlamaBindings.CONTEXT_OFFLOAD_KQV.set(contextParams, 0L, (byte) (modelConfig.isOffloadKvToGpu() ? 1 : 0));
-
+            
             // Flash attention (INT, correct field name)
             LlamaBindings.CONTEXT_FLASH_ATTN_TYPE.set(contextParams, 0L, modelConfig.isFlashAttention() ? 1 : 0);
-
+            
             // Defragmentation threshold
             LlamaBindings.CONTEXT_DEFRAG_THOLD.set(contextParams, 0L, modelConfig.getDefragThreshold());
-
+            
             // Performance metrics
             LlamaBindings.CONTEXT_NO_PERF.set(contextParams, 0L, (byte) 0);
-
+            
             // Embeddings
             LlamaBindings.CONTEXT_EMBEDDINGS.set(contextParams, 0L, (byte) (modelConfig.isEmbeddings() ? 1 : 0));
-
+            
             // KVCache Types
             LlamaBindings.CONTEXT_K_CACHE_TYPE.set(contextParams, 0L, (byte) (modelConfig.getCacheTypeK().getNativeId()));
             LlamaBindings.CONTEXT_V_CACHE_TYPE.set(contextParams, 0L, (byte) (modelConfig.getCacheTypeV().getNativeId()));
-
-
+            
+            
         } catch (Throwable t) {
             throw new RuntimeException("Failed to apply model config to context params", t);
         }
     }
-
+    
     /**
      * Get the native pointer to the context
      */
     public MemorySegment ptr() {
         return ctx;
     }
-
+    
     /**
      * Get the associated model
      */
     public LlamaModel getModel() {
         return model;
     }
-
+    
     /**
      * Get model configuration
      */
     public ModelConfig getModelConfig() {
         return modelConfig;
     }
-
+    
     // ============================================================================
     // KV CACHE MANAGEMENT
     // ============================================================================
-
+    
     /**
      * Obtains a handle to the internal KV cache memory.
      * May return NULL if the context hasn't been used yet or the memory
@@ -154,7 +155,7 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to obtain KV cache memory handle", t);
         }
     }
-
+    
     /**
      * Clear the entire KV cache
      * Use when starting a fresh conversation
@@ -166,20 +167,20 @@ public class LlamaContext implements AutoCloseable {
         }
         try {
             MemorySegment memHandle = getMemoryHandle();
-
+            
             if (memHandle.equals(MemorySegment.NULL)) {
                 return;
             }
-
+            
             // 'false' resets metadata (standard reset)
             // 'true' wipes the physical buffers.
             LlamaBindings.llama_memory_clear.invoke(memHandle, false);
-
+            
         } catch (Throwable t) {
             throw new RuntimeException("Failed to clear KV cache", t);
         }
     }
-
+    
     /**
      * Shifts the context window left by discarding the oldest tokens,
      * keeping the most recent `keepTokens` tokens.
@@ -189,84 +190,110 @@ public class LlamaContext implements AutoCloseable {
      */
     public int shiftContextLeft(int keepTokens) {
         int currentTokens = getMaxSequencePosition(0) + 1;
+        
         if (currentTokens <= keepTokens) {
             return 0;
         }
-
+        
         int tokensToRemove = currentTokens - keepTokens;
-
-        // Remove tokens from position 0 to tokensToRemove-1
-        removeKvCacheTokens(0, 0, tokensToRemove - 1);
-
-        // Shift remaining tokens to start at position 0
-        shiftKvCacheSequence(0, tokensToRemove, currentTokens - 1, -tokensToRemove);
-
+        
+        // posEnd is exclusive
+        removeKvCacheTokens(0, 0, tokensToRemove);
+        
+        // shift surviving tokens back to zero
+        shiftKvCacheSequence(
+                0,
+                tokensToRemove,
+                currentTokens,
+                -tokensToRemove
+        );
+        
         return tokensToRemove;
     }
-
+    
     /**
      * Remove tokens from a specific sequence in the KV cache
-     * 
-     * @param seqId Sequence ID (0 for single conversation)
+     *
+     * @param seqId    Sequence ID (0 for single conversation)
      * @param posStart Start position (inclusive)
-     * @param posEnd End position (exclusive, -1 for all)
+     * @param posEnd   End position (exclusive, -1 for all)
      * @return true if successful
      */
     public boolean removeKvCacheTokens(int seqId, int posStart, int posEnd) {
         try {
-            return (boolean) LlamaBindings.llama_memory_seq_rm.invoke(ctx, seqId, posStart, posEnd);
+            MemorySegment memHandle = getMemoryHandle();
+            if (memHandle.equals(MemorySegment.NULL)) {
+                return false; // context not yet initialized
+            }
+            return (boolean) LlamaBindings.llama_memory_seq_rm.invoke(memHandle, seqId, posStart, posEnd);
         } catch (Throwable t) {
             throw new RuntimeException("Failed to remove KV cache tokens", t);
         }
     }
-
+    
     /**
      * Copy KV cache from one sequence to another
      * Useful for branching conversations or speculative decoding
      */
     public void copyKvCacheSequence(int seqIdSrc, int seqIdDst, int posStart, int posEnd) {
         try {
-            LlamaBindings.llama_memory_seq_cp.invoke(ctx, seqIdSrc, seqIdDst, posStart, posEnd);
+            MemorySegment memHandle = getMemoryHandle();
+            if (memHandle.equals(MemorySegment.NULL)) {
+                throw new IllegalStateException("Cannot copy KV cache: context not yet initialized");
+            }
+            LlamaBindings.llama_memory_seq_cp.invoke(memHandle, seqIdSrc, seqIdDst, posStart, posEnd);
         } catch (Throwable t) {
             throw new RuntimeException("Failed to copy KV cache sequence", t);
         }
     }
-
+    
     /**
      * Keep only a specific sequence in the KV cache, removing all others
      */
     public void keepOnlySequence(int seqId) {
         try {
-            LlamaBindings.llama_memory_seq_keep.invoke(ctx, seqId);
+            MemorySegment memHandle = getMemoryHandle();
+            if (memHandle.equals(MemorySegment.NULL)) {
+                throw new IllegalStateException("Cannot keep sequence: context not yet initialized");
+            }
+            LlamaBindings.llama_memory_seq_keep.invoke(memHandle, seqId);
         } catch (Throwable t) {
             throw new RuntimeException("Failed to keep sequence", t);
         }
     }
-
+    
     /**
      * Add an offset to all positions in a sequence
      * Used for context shifting
      */
     public void shiftKvCacheSequence(int seqId, int posStart, int posEnd, int delta) {
         try {
-            LlamaBindings.llama_memory_seq_add.invoke(ctx, seqId, posStart, posEnd, delta);
+            MemorySegment memHandle = getMemoryHandle();
+            if (memHandle.equals(MemorySegment.NULL)) {
+                throw new IllegalStateException("Cannot shift KV cache: context not yet initialized");
+            }
+            LlamaBindings.llama_memory_seq_add.invoke(memHandle, seqId, posStart, posEnd, delta);
         } catch (Throwable t) {
             throw new RuntimeException("Failed to shift KV cache sequence", t);
         }
     }
-
+    
     /**
      * Divide all positions in a sequence by a divisor
      * Used for context compression
      */
     public void divideKvCacheSequence(int seqId, int posStart, int posEnd, int divisor) {
         try {
-            LlamaBindings.llama_memory_seq_div.invoke(ctx, seqId, posStart, posEnd, divisor);
+            MemorySegment memHandle = getMemoryHandle();
+            if (memHandle.equals(MemorySegment.NULL)) {
+                throw new IllegalStateException("Cannot divide KV cache: context not yet initialized");
+            }
+            LlamaBindings.llama_memory_seq_div.invoke(memHandle, seqId, posStart, posEnd, divisor);
         } catch (Throwable t) {
             throw new RuntimeException("Failed to divide KV cache sequence", t);
         }
     }
-
+    
     /**
      * Get the maximum position in a sequence
      * Returns -1 if sequence is empty
@@ -282,11 +309,11 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to get max sequence position", t);
         }
     }
-
+    
     // ============================================================================
     // STATE MANAGEMENT (offloading support)
     // ============================================================================
-
+    
     /**
      * Get the size of the context state in bytes
      * Used to allocate buffers for state saving
@@ -298,11 +325,11 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to get state size", t);
         }
     }
-
+    
     /**
      * Save context state to a memory segment
      * Returns number of bytes written
-     * 
+     * <p>
      * Used for checkpointing or offloading to SSD
      */
     public long saveState(MemorySegment dst, long dstSize) {
@@ -312,7 +339,7 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to save state", t);
         }
     }
-
+    
     /**
      * Load context state from a memory segment
      * Returns number of bytes read
@@ -324,7 +351,7 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to load state", t);
         }
     }
-
+    
     /**
      * Save a specific sequence to a file
      * For SSD offloading
@@ -339,7 +366,7 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to save sequence to file", t);
         }
     }
-
+    
     /**
      * Load a sequence from a file
      * Used to restore from SSD storage
@@ -354,14 +381,14 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to load sequence from file", t);
         }
     }
-
+    
     // ============================================================================
     // BATCH PROCESSING
     // ============================================================================
-
+    
     /**
      * Decode a batch of tokens
-     * 
+     *
      * @param batch The batch to decode
      * @return 0 on success, non-zero on error
      */
@@ -369,14 +396,14 @@ public class LlamaContext implements AutoCloseable {
         if (this.ctx == null || this.ctx.address() == 0) {
             throw new IllegalStateException("LlamaContext is not initialized or has been closed.");
         }
-
+        
         try {
             return (int) LlamaBindings.llama_decode.invoke(ctx, batch.getSegment());
         } catch (Throwable t) {
             throw new RuntimeException("Failed to decode batch", t);
         }
     }
-
+    
     /**
      * Get logits for the last processed token
      * Returns a pointer to float array of size vocab_size
@@ -388,7 +415,7 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to get logits", t);
         }
     }
-
+    
     /**
      * Get logits for a specific token in the batch
      */
@@ -399,7 +426,7 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to get logits", t);
         }
     }
-
+    
     /**
      * Get embeddings (when context is in embedding mode)
      */
@@ -410,7 +437,7 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to get embeddings", t);
         }
     }
-
+    
     /**
      * Get embeddings (when context is in embedding mode)
      */
@@ -421,7 +448,7 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to get embeddings", t);
         }
     }
-
+    
     /**
      * Get embeddings for a specific sequence
      */
@@ -432,11 +459,11 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to get embeddings for sequence", t);
         }
     }
-
+    
     // ============================================================================
     // PERFORMANCE TELEMETRY
     // ============================================================================
-
+    
     /**
      * Print performance statistics to console
      * Shows token/sec, memory usage, etc.
@@ -448,7 +475,7 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to print performance stats", t);
         }
     }
-
+    
     /**
      * Reset performance counters
      */
@@ -459,11 +486,11 @@ public class LlamaContext implements AutoCloseable {
             throw new RuntimeException("Failed to reset performance stats", t);
         }
     }
-
+    
     // ============================================================================
     // UTILITIES
     // ============================================================================
-
+    
     /**
      * Estimate current KV cache usage in GB
      */
@@ -479,7 +506,7 @@ public class LlamaContext implements AutoCloseable {
                 model.getEmbeddingSize()
         );
     }
-
+    
     /**
      * Print context information to console
      */
@@ -498,7 +525,7 @@ public class LlamaContext implements AutoCloseable {
         System.out.println("=".repeat(60));
         System.out.println("\n\n");
     }
-
+    
     @Override
     public void close() {
         try {

@@ -10,11 +10,11 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class CachedContextStateTest {
-
+    
     private static final String TEST_MODEL_PATH = "/path/to/model.gguf";
     private static final byte[] DUMMY_BYTES = new byte[1024 * 1024]; // 1 MB
     private ModelConfig baseConfig;
-
+    
     @BeforeEach
     void setUp() {
         baseConfig = ModelConfig.Builder.create()
@@ -26,6 +26,19 @@ class CachedContextStateTest {
                 .build();
     }
 
+    @Test
+    @DisplayName("toString should contain path, size, and age placeholders")
+    void toStringShouldContainEssentialFields() {
+        CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH, 0);
+        String s = state.toString();
+        assertTrue(s.contains("CachedState["));
+        assertTrue(s.contains("path=" + TEST_MODEL_PATH));
+        assertTrue(s.contains("size="));
+        assertTrue(s.contains("age="));
+        assertTrue(s.contains("MB"));
+        assertTrue(s.contains("ms"));
+    }
+
     @Nested
     @DisplayName("isCompatibleWith")
     class IsCompatibleWith {
@@ -33,14 +46,14 @@ class CachedContextStateTest {
         @Test
         @DisplayName("Should return true when all criteria match")
         void shouldReturnTrueWhenAllMatch() {
-            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH);
+            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH, 0);
             assertTrue(state.isCompatibleWith(TEST_MODEL_PATH, baseConfig));
         }
 
         @Test
         @DisplayName("Should return false when model path differs")
         void shouldRejectDifferentPath() {
-            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH);
+            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH, 0);
             assertFalse(state.isCompatibleWith("/other/path.gguf", baseConfig));
         }
 
@@ -54,7 +67,7 @@ class CachedContextStateTest {
                     .cacheTypeV(KVCacheType.TQ3_0)
                     .embeddings(false)
                     .build();
-            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH);
+            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH, 0);
             assertFalse(state.isCompatibleWith(TEST_MODEL_PATH, other));
         }
 
@@ -68,7 +81,7 @@ class CachedContextStateTest {
                     .cacheTypeV(KVCacheType.TQ3_0)
                     .embeddings(false)
                     .build();
-            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH);
+            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH, 0);
             assertFalse(state.isCompatibleWith(TEST_MODEL_PATH, other));
         }
 
@@ -82,7 +95,7 @@ class CachedContextStateTest {
                     .cacheTypeV(KVCacheType.TQ3_0)
                     .embeddings(false)
                     .build();
-            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH);
+            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH, 0);
             assertFalse(state.isCompatibleWith(TEST_MODEL_PATH, other));
         }
 
@@ -96,7 +109,7 @@ class CachedContextStateTest {
                     .cacheTypeV(KVCacheType.F16)   // different
                     .embeddings(false)
                     .build();
-            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH);
+            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH, 0);
             assertFalse(state.isCompatibleWith(TEST_MODEL_PATH, other));
         }
 
@@ -110,7 +123,7 @@ class CachedContextStateTest {
                     .cacheTypeV(KVCacheType.TQ3_0)
                     .embeddings(true)   // different
                     .build();
-            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH);
+            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH, 0);
             assertFalse(state.isCompatibleWith(TEST_MODEL_PATH, other));
         }
     }
@@ -123,7 +136,7 @@ class CachedContextStateTest {
         @DisplayName("Should return positive age when saved time is in the past")
         void shouldReturnPositiveAge() {
             long past = System.currentTimeMillis() - 10_000;
-            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, past, TEST_MODEL_PATH);
+            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, past, TEST_MODEL_PATH, 0);
             long age = state.getAgeMs();
             assertTrue(age >= 10_000, "Age should be at least 10 seconds");
             // Allow some tolerance for execution time
@@ -134,7 +147,7 @@ class CachedContextStateTest {
         @DisplayName("Should be zero when saved just now")
         void shouldBeZeroForCurrentTime() {
             long now = System.currentTimeMillis();
-            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, now, TEST_MODEL_PATH);
+            CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, now, TEST_MODEL_PATH, 0);
             long age = state.getAgeMs();
             assertTrue(age >= 0);
             assertTrue(age < 1_000); // within 1 second
@@ -148,28 +161,15 @@ class CachedContextStateTest {
         @Test
         @DisplayName("Should return 0 for empty byte array")
         void shouldReturnZeroForEmpty() {
-            CachedContextState state = new CachedContextState(new byte[0], baseConfig, 0, TEST_MODEL_PATH);
+            CachedContextState state = new CachedContextState(new byte[0], baseConfig, 0, TEST_MODEL_PATH, 0);
             assertEquals(0.0, state.getSizeMB(), 0.001);
         }
 
         @Test
         @DisplayName("Should return roughly 1.0 for 1 MB")
         void shouldReturnOneForOneMegabyte() {
-            CachedContextState state = new CachedContextState(new byte[1_048_576], baseConfig, 0, TEST_MODEL_PATH);
+            CachedContextState state = new CachedContextState(new byte[1_048_576], baseConfig, 0, TEST_MODEL_PATH, 0);
             assertEquals(1.0, state.getSizeMB(), 0.01);
         }
-    }
-
-    @Test
-    @DisplayName("toString should contain path, size, and age placeholders")
-    void toStringShouldContainEssentialFields() {
-        CachedContextState state = new CachedContextState(DUMMY_BYTES, baseConfig, 0, TEST_MODEL_PATH);
-        String s = state.toString();
-        assertTrue(s.contains("CachedState["));
-        assertTrue(s.contains("path=" + TEST_MODEL_PATH));
-        assertTrue(s.contains("size="));
-        assertTrue(s.contains("age="));
-        assertTrue(s.contains("MB"));
-        assertTrue(s.contains("ms"));
     }
 }
