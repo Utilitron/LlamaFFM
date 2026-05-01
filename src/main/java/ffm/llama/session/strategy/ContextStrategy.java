@@ -1,6 +1,6 @@
 package ffm.llama.session.strategy;
 
-import ffm.llama.model.LlamaContext;
+import ffm.llama.context.LlamaContext;
 
 /**
  * Strategy for managing context when approaching the context window limit.

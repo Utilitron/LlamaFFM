@@ -1,7 +1,7 @@
 package ffm.llama.session;
 
-import ffm.llama.model.LlamaContext;
-import ffm.llama.model.state.CachedContextState;
+import ffm.llama.context.LlamaContext;
+import ffm.llama.context.state.CachedContextState;
 import ffm.llama.service.LlmService;
 
 import java.util.Optional;

@@ -22,7 +22,7 @@ public final class NativeMemoryUtils {
      * @return Java String, or null if ptr is NULL
      */
     public static String readCString(MemorySegment ptr) {
-        if (ptr == null || ptr.equals(MemorySegment.NULL) || ptr.address() == 0L) {
+        if (ptr == null || ptr.equals(MemorySegment.NULL)) {
             return null;
         }
         
@@ -66,7 +66,7 @@ public final class NativeMemoryUtils {
      * @return Java String
      */
     public static String readCStringExact(MemorySegment ptr, long byteLen) {
-        if (ptr == null || ptr.equals(MemorySegment.NULL) || ptr.address() == 0L) {
+        if (ptr == null || ptr.equals(MemorySegment.NULL)) {
             return null;
         }
         if (byteLen == 0) {
@@ -87,7 +87,7 @@ public final class NativeMemoryUtils {
      * @return Java String
      */
     public static String readCStringBounded(MemorySegment ptr, int maxLen) {
-        if (ptr == null || ptr.equals(MemorySegment.NULL) || ptr.address() == 0L) {
+        if (ptr == null || ptr.equals(MemorySegment.NULL)) {
             return null;
         }
         
@@ -233,8 +233,8 @@ public final class NativeMemoryUtils {
      * @throws IllegalStateException if pointer is invalid
      */
     public static void requireValid(MemorySegment ptr, String name) {
-        if (ptr == null || ptr.equals(MemorySegment.NULL) || ptr.address() == 0L) {
-            throw new IllegalStateException(name + " pointer is invalid (null or zero)");
+        if (ptr == null || ptr.equals(MemorySegment.NULL)) {
+            throw new IllegalStateException(name + " pointer is invalid (null)");
         }
     }
 }

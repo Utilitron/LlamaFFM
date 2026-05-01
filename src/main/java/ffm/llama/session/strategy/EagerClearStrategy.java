@@ -1,6 +1,6 @@
 package ffm.llama.session.strategy;
 
-import ffm.llama.model.LlamaContext;
+import ffm.llama.context.LlamaContext;
 
 /**
  * Eager clear: wipe cache when full and start over.

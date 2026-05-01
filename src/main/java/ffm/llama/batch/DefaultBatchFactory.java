@@ -1,4 +1,4 @@
-package ffm.llama.model;
+package ffm.llama.batch;
 
 public class DefaultBatchFactory implements BatchFactory {
     @Override

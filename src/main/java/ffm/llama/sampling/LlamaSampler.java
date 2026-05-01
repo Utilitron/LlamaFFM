@@ -1,10 +1,11 @@
 package ffm.llama.sampling;
 
 import ffm.llama.binding.LlamaBindings;
-import ffm.llama.model.LlamaContext;
+import ffm.llama.context.LlamaContext;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Sampler for token generation with configurable sampling strategies
@@ -13,8 +14,8 @@ import java.lang.foreign.MemorySegment;
 public class LlamaSampler implements AutoCloseable {
     
     private final MemorySegment samplerChain;
-    private final Arena samplerArena;
     private final MemorySegment vocabPtr;
+    private final AtomicBoolean closed = new AtomicBoolean(false);
     
     /**
      * Create a sampler with default greedy strategy
@@ -27,10 +28,11 @@ public class LlamaSampler implements AutoCloseable {
      * Create a sampler with custom configuration
      */
     public LlamaSampler(SamplerConfig config, MemorySegment vocabPtr) {
-        this.samplerArena = Arena.ofShared();
         this.vocabPtr = vocabPtr;
-        
-        try {
+
+        // Use confined arena for parameter allocation during construction
+        // Arena is closed after initialization since params are only needed during setup
+        try (Arena samplerArena = Arena.ofConfined()) {
             // Get default sampler chain params
             MemorySegment chainParams = samplerArena.allocate(LlamaBindings.SAMPLER_CHAIN_PARAMS_LAYOUT);
             MemorySegment defaultParams = (MemorySegment) LlamaBindings.llama_sampler_chain_default_params.invoke(samplerArena);
@@ -42,7 +44,6 @@ public class LlamaSampler implements AutoCloseable {
             this.samplerChain = (MemorySegment) LlamaBindings.llama_sampler_chain_init.invoke(chainParams);
             
             if (samplerChain == MemorySegment.NULL) {
-                samplerArena.close();
                 throw new RuntimeException("Failed to initialize sampler chain");
             }
             
@@ -50,7 +51,6 @@ public class LlamaSampler implements AutoCloseable {
             buildSamplerChain(config);
             
         } catch (Throwable t) {
-            samplerArena.close();
             throw new RuntimeException("Failed to create sampler", t);
         }
     }
@@ -86,7 +86,7 @@ public class LlamaSampler implements AutoCloseable {
         // Apply Grammar Constraint
         if (config.grammar != null) {
             try (Arena arena = Arena.ofConfined()) {
-                MemorySegment root = arena.allocateFrom("root");
+                MemorySegment root = arena.allocateFrom(config.grammar.rootRule());
                 MemorySegment gbnf = arena.allocateFrom(config.grammar.gbnf());
                 
                 // Initialize the grammar sampler
@@ -114,6 +114,7 @@ public class LlamaSampler implements AutoCloseable {
      * @return Sampled token ID
      */
     public int sample(LlamaContext ctx, int idx) {
+        ensureNotClosed();
         try {
             return (int) LlamaBindings.llama_sampler_sample.invoke(samplerChain, ctx.ptr(), idx);
         } catch (Throwable t) {
@@ -125,6 +126,7 @@ public class LlamaSampler implements AutoCloseable {
      * Print sampler performance statistics
      */
     public void printPerformanceStats() {
+        ensureNotClosed();
         try {
             LlamaBindings.llama_perf_sampler_print.invoke(samplerChain);
         } catch (Throwable t) {
@@ -136,6 +138,7 @@ public class LlamaSampler implements AutoCloseable {
      * Reset sampler performance counters
      */
     public void resetPerformanceStats() {
+        ensureNotClosed();
         try {
             LlamaBindings.llama_perf_sampler_reset.invoke(samplerChain);
         } catch (Throwable t) {
@@ -145,12 +148,32 @@ public class LlamaSampler implements AutoCloseable {
     
     @Override
     public void close() {
+        if (!closed.compareAndSet(false, true)) return;
+        
         try {
             LlamaBindings.llama_sampler_free.invoke(samplerChain);
         } catch (Throwable t) {
             System.err.println("Warning: Failed to free sampler: " + t.getMessage());
-        } finally {
-            samplerArena.close();
+        }
+    }
+    
+    /**
+     * Checks if this sampler has been closed.
+     *
+     * @return true if close() has been called
+     */
+    public boolean isClosed() {
+        return closed.get();
+    }
+    
+    /**
+     * Ensures this sampler is not closed.
+     *
+     * @throws IllegalStateException if sampler is closed
+     */
+    private void ensureNotClosed() {
+        if (closed.get()) {
+            throw new IllegalStateException("Sampler has been closed");
         }
     }
     

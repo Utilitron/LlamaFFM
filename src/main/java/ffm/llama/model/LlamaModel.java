@@ -11,6 +11,7 @@ import java.lang.foreign.ValueLayout;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Represents a loaded llama.cpp model configuration.
@@ -23,7 +24,8 @@ public class LlamaModel implements AutoCloseable {
     private final MemorySegment vocabPtr;
     private final String modelPath;
     private final ModelConfig modelConfig;
-    
+    private final AtomicBoolean closed = new AtomicBoolean(false);
+
     // Model metadata (cached after loading)
     private final int nVocab;
     private final int nCtxTrain;
@@ -47,7 +49,7 @@ public class LlamaModel implements AutoCloseable {
      */
     public LlamaModel(String path, ModelConfig modelConfig) {
         this.modelPath = path;
-        this.modelArena = Arena.ofShared();
+        this.modelArena = Arena.ofConfined();
         
         try {
             // Allocate path string in model's arena
@@ -61,9 +63,7 @@ public class LlamaModel implements AutoCloseable {
             MemorySegment.copy(defaultParams, 0, modelParams, 0, LlamaBindings.MODEL_PARAMS_LAYOUT.byteSize());
             
             // Always ensure we have a config (use default if null)
-            this.modelConfig = (modelConfig != null)
-                    ? modelConfig
-                    : ModelConfig.createDefault();
+            this.modelConfig = (modelConfig != null) ? modelConfig : ModelConfig.createDefault();
             
             applyModelConfigToModelParams(modelParams, this.modelConfig);
             
@@ -76,19 +76,28 @@ public class LlamaModel implements AutoCloseable {
             
             this.modelPtr = NativeMemoryUtils.asOpaqueHandle(rawPtr);
             
-            // Extract the Vocab pointer immediately
-            this.vocabPtr = (MemorySegment) LlamaBindings.llama_model_get_vocab.invoke(modelPtr);
-            
-            // Cache metadata - Note: nVocab now uses vocabPtr
-            this.nVocab = (int) LlamaBindings.llama_vocab_n_tokens.invoke(vocabPtr);
-            this.nCtxTrain = (int) LlamaBindings.llama_model_n_ctx_train.invoke(modelPtr);
-            this.nEmbd = (int) LlamaBindings.llama_model_n_embd.invoke(modelPtr);
-            this.nLayer = (int) LlamaBindings.llama_model_n_layer.invoke(modelPtr);
-            this.nParams = (long) LlamaBindings.llama_model_n_params.invoke(modelPtr);
-            this.modelSizeBytes = Files.size(Path.of(modelPath));
-            
+            // Extract metadata; if anything fails, free the native model pointer
+            try {
+                // Extract the Vocab pointer immediately
+                this.vocabPtr = (MemorySegment) LlamaBindings.llama_model_get_vocab.invoke(modelPtr);
+                
+                // Cache metadata - Note: nVocab now uses vocabPtr
+                this.nVocab = (int) LlamaBindings.llama_vocab_n_tokens.invoke(vocabPtr);
+                this.nCtxTrain = (int) LlamaBindings.llama_model_n_ctx_train.invoke(modelPtr);
+                this.nEmbd = (int) LlamaBindings.llama_model_n_embd.invoke(modelPtr);
+                this.nLayer = (int) LlamaBindings.llama_model_n_layer.invoke(modelPtr);
+                this.nParams = (long) LlamaBindings.llama_model_n_params.invoke(modelPtr);
+                this.modelSizeBytes = Files.size(Path.of(modelPath));
+            } catch (Throwable t) {
+                // Free the model that was already loaded
+                try {
+                    LlamaBindings.llama_model_free.invoke(modelPtr);
+                } catch (Throwable ignored) { }
+                throw new RuntimeException("Failed to load model", t);
+            }
+
         } catch (Throwable t) {
-            modelArena.close();
+            try { modelArena.close(); } catch (Exception ignored) {}
             throw new RuntimeException("Failed to load model", t);
         }
     }
@@ -117,6 +126,7 @@ public class LlamaModel implements AutoCloseable {
      * Used internally for context creation
      */
     public MemorySegment ptr() {
+        ensureNotClosed();
         return modelPtr;
     }
     
@@ -138,10 +148,12 @@ public class LlamaModel implements AutoCloseable {
      * Get vocabulary size
      */
     public int getVocabSize() {
+        ensureNotClosed();
         return nVocab;
     }
     
     public MemorySegment vocabPtr() {
+        ensureNotClosed();
         return vocabPtr;
     }
     
@@ -149,6 +161,7 @@ public class LlamaModel implements AutoCloseable {
      * Get training context size
      */
     public int getTrainContextSize() {
+        ensureNotClosed();
         return nCtxTrain;
     }
     
@@ -156,6 +169,7 @@ public class LlamaModel implements AutoCloseable {
      * Get embedding dimensions
      */
     public int getEmbeddingSize() {
+        ensureNotClosed();
         return nEmbd;
     }
     
@@ -163,6 +177,7 @@ public class LlamaModel implements AutoCloseable {
      * Get number of layers
      */
     public int getLayerCount() {
+        ensureNotClosed();
         return nLayer;
     }
     
@@ -170,6 +185,7 @@ public class LlamaModel implements AutoCloseable {
      * Get total parameter count
      */
     public long getParameterCount() {
+        ensureNotClosed();
         return nParams;
     }
     
@@ -177,6 +193,7 @@ public class LlamaModel implements AutoCloseable {
      * Get model size in bytes
      */
     public long getModelSizeBytes() {
+        ensureNotClosed();
         return modelSizeBytes;
     }
     
@@ -184,6 +201,7 @@ public class LlamaModel implements AutoCloseable {
      * Get model size in GB
      */
     public double getModelSizeGB() {
+        ensureNotClosed();
         return modelSizeBytes / 1_000_000_000.0;
     }
     
@@ -191,6 +209,7 @@ public class LlamaModel implements AutoCloseable {
      * Get a human-readable description of the model
      */
     public String getDescription() {
+        ensureNotClosed();
         try (Arena tempArena = Arena.ofConfined()) {
             MemorySegment buffer = tempArena.allocate(256);
             int len = (int) LlamaBindings.llama_model_desc.invoke(modelPtr, buffer, 256L);
@@ -207,6 +226,7 @@ public class LlamaModel implements AutoCloseable {
      * Get BOS (Beginning of Sequence) token ID
      */
     public int getBosToken() {
+        ensureNotClosed();
         try {
             return (int) LlamaBindings.llama_vocab_bos.invoke(vocabPtr);
         } catch (Throwable t) {
@@ -218,6 +238,7 @@ public class LlamaModel implements AutoCloseable {
      * Get EOS (End of Sequence) token ID
      */
     public int getEosToken() {
+        ensureNotClosed();
         try {
             return (int) LlamaBindings.llama_vocab_eos.invoke(vocabPtr);
         } catch (Throwable t) {
@@ -229,6 +250,7 @@ public class LlamaModel implements AutoCloseable {
      * Get EOT (End of Turn) token ID
      */
     public int getEotToken() {
+        ensureNotClosed();
         try {
             return (int) LlamaBindings.llama_vocab_eot.invoke(vocabPtr);
         } catch (Throwable t) {
@@ -240,6 +262,7 @@ public class LlamaModel implements AutoCloseable {
      * Get newline token ID
      */
     public int getNewlineToken() {
+        ensureNotClosed();
         try {
             return (int) LlamaBindings.llama_vocab_nl.invoke(vocabPtr);
         } catch (Throwable t) {
@@ -252,6 +275,7 @@ public class LlamaModel implements AutoCloseable {
      * Returns null if no template is found.
      */
     public String getChatTemplate() {
+        ensureNotClosed();
         try {
             // Pass NULL for the 'name' parameter to get the default template
             MemorySegment templatePtr = (MemorySegment) LlamaBindings.llama_model_chat_template.invoke(modelPtr, MemorySegment.NULL);
@@ -276,6 +300,7 @@ public class LlamaModel implements AutoCloseable {
      * @return Array of token IDs
      */
     public int[] tokenize(String text, boolean addBos, boolean special) {
+        ensureNotClosed();
         try (Arena tempArena = Arena.ofConfined()) {
             // Allocate C string
             MemorySegment textSeg = tempArena.allocateFrom(text);
@@ -315,6 +340,7 @@ public class LlamaModel implements AutoCloseable {
      * Convert a single token ID to its string representation
      */
     public String tokenToString(int tokenId) {
+        ensureNotClosed();
         try (Arena tempArena = Arena.ofConfined()) {
             MemorySegment buffer = tempArena.allocate(256);
             
@@ -346,6 +372,14 @@ public class LlamaModel implements AutoCloseable {
      * Detokenize an array of tokens to text
      */
     public String detokenize(int[] tokens, boolean special, boolean unparse) {
+        ensureNotClosed();
+        // Reject invalid token IDs before touching native code
+        for (int token : tokens) {
+            if (token < 0 || token >= nVocab) {
+                throw new IllegalArgumentException("Invalid token ID: " + token);
+            }
+        }
+        
         try (Arena tempArena = Arena.ofConfined()) {
             // Allocate token array
             MemorySegment tokenSeg = tempArena.allocate(ValueLayout.JAVA_INT, tokens.length);
@@ -379,6 +413,7 @@ public class LlamaModel implements AutoCloseable {
     }
     
     public void printInfo() {
+        ensureNotClosed();
         System.out.println("=".repeat(60));
         System.out.println("Model Information");
         System.out.println("=".repeat(60));
@@ -396,6 +431,8 @@ public class LlamaModel implements AutoCloseable {
     
     @Override
     public void close() {
+        if (!closed.compareAndSet(false, true)) return;
+        
         try {
             if (modelPtr != null && !modelPtr.equals(MemorySegment.NULL)) {
                 // Free the model
@@ -405,8 +442,32 @@ public class LlamaModel implements AutoCloseable {
             // Log but don't throw - we're in cleanup
             System.err.println("Warning: Failed to free model: " + t.getMessage());
         } finally {
-            // Always close the arena
-            modelArena.close();
+            try { modelArena.close(); } catch (Exception ignored) {}
         }
+    }
+    
+    /**
+     * Checks if this model has been closed.
+     *
+     * @return true if close() has been called
+     */
+    public boolean isClosed() {
+        return closed.get();
+    }
+    
+    /**
+     * Ensures this model is not closed.
+     *
+     * @throws IllegalStateException if model is closed
+     */
+    private void ensureNotClosed() {
+        if (closed.get()) {
+            throw new IllegalStateException("Model has been closed");
+        }
+    }
+    
+    @Override
+    public String toString() {
+        return "LlamaModel[path=" + modelPath + ", closed=" + closed.get() + "]";
     }
 }

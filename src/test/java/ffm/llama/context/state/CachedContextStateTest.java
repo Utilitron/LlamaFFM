@@ -1,6 +1,7 @@
-package ffm.llama.model.state;
+package ffm.llama.context.state;
 
 import ffm.llama.config.ModelConfig;
+import ffm.llama.context.state.CachedContextState;
 import ffm.llama.enums.KVCacheType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;

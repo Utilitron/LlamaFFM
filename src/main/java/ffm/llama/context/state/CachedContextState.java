@@ -1,4 +1,4 @@
-package ffm.llama.model.state;
+package ffm.llama.context.state;
 
 import ffm.llama.config.ModelConfig;
 

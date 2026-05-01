@@ -1,4 +1,4 @@
-package ffm.llama.model;
+package ffm.llama.batch;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;

@@ -1,4 +1,4 @@
-package ffm.llama.model;
+package ffm.llama.batch;
 
 public interface BatchFactory {
     LlamaBatch createPrefillBatch(int[] tokens, int startPos, boolean outputLogits);

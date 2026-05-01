@@ -1,6 +1,6 @@
 package ffm.llama.session.strategy;
 
-import ffm.llama.model.LlamaContext;
+import ffm.llama.context.LlamaContext;
 
 /**
  * Sliding window: keep last N% of tokens, discard oldest.
