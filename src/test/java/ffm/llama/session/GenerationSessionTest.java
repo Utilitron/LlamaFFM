@@ -1,11 +1,13 @@
 package ffm.llama.session;
 
+import ffm.llama.batch.BatchDecoder;
+import ffm.llama.cache.KvCacheManager;
 import ffm.llama.config.ModelConfig;
-import ffm.llama.model.BatchFactory;
-import ffm.llama.model.LlamaBatch;
-import ffm.llama.model.LlamaContext;
+import ffm.llama.batch.BatchFactory;
+import ffm.llama.batch.LlamaBatch;
+import ffm.llama.context.LlamaContext;
 import ffm.llama.model.LlamaModel;
-import ffm.llama.model.state.CachedContextState;
+import ffm.llama.context.state.CachedContextState;
 import ffm.llama.sampling.LlamaSampler;
 import ffm.llama.session.strategy.ContextStrategy;
 
@@ -33,11 +35,17 @@ class GenerationSessionTest {
     @Mock private ModelConfig modelConfig;
     @Mock private BatchFactory batchFactory;
     @Mock private LlamaBatch batch;
-    
+    @Mock private KvCacheManager kvCache;
+    @Mock private BatchDecoder decoder;
+
     private GenerationSession.Builder baseBuilder;
     
     @BeforeEach
     void setUp() {
+        // Context's helpers return the mocks
+        lenient().when(context.decoder()).thenReturn(decoder);
+        lenient().when(context.kvCache()).thenReturn(kvCache);
+        
         // Use lenient stubbing to avoid UnnecessaryStubbingException in tests that don't use these
         lenient().when(context.getModelConfig()).thenReturn(modelConfig);
         lenient().when(modelConfig.getContextSize()).thenReturn(4096);
@@ -66,10 +74,10 @@ class GenerationSessionTest {
         @Test
         @DisplayName("Should process tokens in batches and return count")
         void shouldProcessTokensInBatches() {
+            when(decoder.decode(any(LlamaBatch.class))).thenReturn(0);
             GenerationSession session = baseBuilder.build();
             int[] tokens = {1, 2, 3};
-            when(context.decode(any(LlamaBatch.class))).thenReturn(0);
-            
+
             int processed = session.prefill(tokens);
             assertEquals(3, processed);
             assertEquals(3, session.getCachePosition());
@@ -94,14 +102,15 @@ class GenerationSessionTest {
         @Test
         @DisplayName("Should call sampler, callback, and decode until EOS")
         void shouldCallSamplerCallbackAndDecodeUntilEOS() {
-            GenerationSession session = baseBuilder.build();
             when(model.getEosToken()).thenReturn(42);
             when(model.tokenToString(anyInt())).thenReturn("A");
-            when(context.decode(any(LlamaBatch.class))).thenReturn(0);
+            when(decoder.decode(any(LlamaBatch.class))).thenReturn(0);
             when(sampler.sample(context, -1)).thenReturn(1, 2, 42);  // 2 tokens then EOS
             when(contextStrategy.needsManagement(anyInt(), eq(context))).thenReturn(false);
             
             Consumer<String> callback = mock(Consumer.class);
+            
+            GenerationSession session = baseBuilder.build();
             int generated = session.generate(callback, 0);
             
             assertEquals(2, generated);
@@ -111,16 +120,16 @@ class GenerationSessionTest {
         @Test
         @DisplayName("Should invoke context management when needed")
         void shouldInvokeContextManagementWhenNeeded() {
-            GenerationSession session = baseBuilder.build();
             when(model.getEosToken()).thenReturn(42);
             when(model.tokenToString(anyInt())).thenReturn("X");
-            when(context.decode(any(LlamaBatch.class))).thenReturn(0);
+            when(decoder.decode(any(LlamaBatch.class))).thenReturn(0);
             when(sampler.sample(context, -1)).thenReturn(1, 42);
             when(contextStrategy.needsManagement(anyInt(), eq(context)))
                     .thenReturn(true, false);
             when(contextStrategy.manage(anyInt(), any(), eq(context)))
                     .thenReturn(ContextStrategy.ManagementAction.none());
-            
+
+            GenerationSession session = baseBuilder.build();
             session.generate(t -> {}, 0);
             verify(contextStrategy, atLeastOnce()).manage(anyInt(), any(), eq(context));
         }
@@ -135,10 +144,10 @@ class GenerationSessionTest {
         @Test
         @DisplayName("Should delegate to stateSerializer and return result")
         void shouldDelegateToStateSerializer() {
-            GenerationSession session = baseBuilder.build();
             CachedContextState dummyState = mock(CachedContextState.class);
             when(stateSerializer.snapshot(any())).thenReturn(Optional.of(dummyState));
-            
+
+            GenerationSession session = baseBuilder.build();
             CachedContextState result = session.snapshot();
             assertSame(dummyState, result);
         }
@@ -153,11 +162,11 @@ class GenerationSessionTest {
         @Test
         @DisplayName("Should update position when successful")
         void shouldUpdatePositionWhenSuccessful() {
-            GenerationSession session = baseBuilder.build();
             CachedContextState state = mock(CachedContextState.class);
             when(state.getNTokens()).thenReturn(100);
             when(stateSerializer.restoreContext(context, state)).thenReturn(true);
-            
+
+            GenerationSession session = baseBuilder.build();
             assertTrue(session.restore(state));
             assertEquals(100, session.getCachePosition());
         }
@@ -165,10 +174,10 @@ class GenerationSessionTest {
         @Test
         @DisplayName("Should not update position when unsuccessful")
         void shouldNotUpdatePositionWhenUnsuccessful() {
-            GenerationSession session = baseBuilder.build();
             CachedContextState state = mock(CachedContextState.class);
             when(stateSerializer.restoreContext(context, state)).thenReturn(false);
-            
+
+            GenerationSession session = baseBuilder.build();
             assertFalse(session.restore(state));
             assertEquals(0, session.getCachePosition());
         }
@@ -183,13 +192,14 @@ class GenerationSessionTest {
         @Test
         @DisplayName("Should clear KV cache and reset position")
         void shouldClearCacheAndPosition() {
+            when(decoder.decode(any(LlamaBatch.class))).thenReturn(0);
+            
             GenerationSession session = baseBuilder.build();
-            when(context.decode(any(LlamaBatch.class))).thenReturn(0);
             session.prefill(new int[]{1, 2});
             session.reset();
             
             assertEquals(0, session.getCachePosition());
-            verify(context).clearKvCache();
+            verify(kvCache).clearKvCache();
         }
     }
     

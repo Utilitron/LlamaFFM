@@ -4,11 +4,11 @@ import ffm.llama.binding.LlamaBindings;
 import ffm.llama.config.ModelConfig;
 import ffm.llama.enums.PoolingType;
 import ffm.llama.message.*;
-import ffm.llama.model.LlamaBatch;
-import ffm.llama.model.LlamaContext;
+import ffm.llama.batch.LlamaBatch;
+import ffm.llama.context.LlamaContext;
 import ffm.llama.model.LlamaModel;
-import ffm.llama.model.state.CachedContextState;
-import ffm.llama.model.state.ContextStateManager;
+import ffm.llama.context.state.CachedContextState;
+import ffm.llama.context.state.ContextStateManager;
 import ffm.llama.sampling.LlamaSampler;
 import ffm.llama.session.GenerationSession;
 import ffm.llama.session.strategy.ContextStrategy;
@@ -223,8 +223,8 @@ public class LlmService implements AutoCloseable {
             if (actualSize <= 0) throw new RuntimeException("Template application failed during formatting.");
             
             return NativeMemoryUtils.readCStringExact(buffer, actualSize);
-        } catch (Throwable t) {
-            throw new RuntimeException("Failed to apply chat template", t);
+        } catch (Throwable e) {
+            throw new RuntimeException("Failed to apply chat template", e);
         }
     }
     
@@ -374,11 +374,11 @@ public class LlmService implements AutoCloseable {
             }
             
             // Clear KV cache for fresh generation
-            ctx.clearKvCache();
+            ctx.kvCache().clearKvCache();
             
             // Process batch - enable logits for last token
             try (LlamaBatch batch = LlamaBatch.forTokens(tokens, 0, 0, !isNone)) {
-                int ret = ctx.decode(batch);
+                int ret = ctx.decoder().decode(batch);
                 if (ret != 0) {
                     throw new RuntimeException("Failed to decode batch (error code: " + ret + ")");
                 }

@@ -1,9 +1,13 @@
 package ffm.llama.session;
 
+import ffm.llama.batch.BatchFactory;
+import ffm.llama.batch.DefaultBatchFactory;
+import ffm.llama.batch.LlamaBatch;
+import ffm.llama.context.LlamaContext;
 import ffm.llama.exception.InferenceException;
 import ffm.llama.model.*;
-import ffm.llama.model.state.CachedContextState;
-import ffm.llama.model.state.ContextStateManager;
+import ffm.llama.context.state.CachedContextState;
+import ffm.llama.context.state.ContextStateManager;
 import ffm.llama.sampling.LlamaSampler;
 import ffm.llama.service.LlmService;
 import ffm.llama.session.metrics.SessionMetrics;
@@ -87,7 +91,7 @@ public class GenerationSession implements AutoCloseable {
                 boolean isLastChunk = (processed + chunkSize >= tokens.length);
                 
                 try (LlamaBatch batch = batchFactory.createPrefillBatch(chunk, cachePosition + processed, isLastChunk)) {
-                    int result = context.decode(batch);
+                    int result = context.decoder().decode(batch);
                     if (result != 0) {
                         throw new InferenceException("Prefill decode failed with code: " + result);
                     }
@@ -153,7 +157,7 @@ public class GenerationSession implements AutoCloseable {
                 
                 // Decode token and update KV cache
                 try (LlamaBatch batch = batchFactory.createDecodeBatch(nextToken, cachePosition)) {
-                    int result = context.decode(batch);
+                    int result = context.decoder().decode(batch);
                     if (result != 0) {
                         throw new InferenceException("Decode failed at position " + cachePosition + " with code: " + result);
                     }
@@ -196,7 +200,7 @@ public class GenerationSession implements AutoCloseable {
      */
     public void reset() {
         ensureNotClosed();
-        context.clearKvCache();
+        context.kvCache().clearKvCache();
         cachedTokens = new int[0];
         cachePosition = 0;
         metrics.reset();
@@ -276,7 +280,7 @@ public class GenerationSession implements AutoCloseable {
         
         switch (action.type()) {
             case SHIFT_LEFT -> {
-                int removed = context.shiftContextLeft(action.parameter());
+                int removed = context.kvCache().shiftContextLeft(action.parameter());
                 if (removed > 0) {
                     cachePosition -= removed;
                     // Trim cached tokens array
@@ -294,7 +298,7 @@ public class GenerationSession implements AutoCloseable {
                 }
             }
             case CLEAR_CACHE -> {
-                context.clearKvCache();
+                context.kvCache().clearKvCache();
                 cachePosition = 0;
                 cachedTokens = new int[0];
                 

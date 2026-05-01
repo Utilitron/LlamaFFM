@@ -14,7 +14,13 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.version>6.0.3</junit.version>
         <mockito.version>5.23.0</mockito.version>
-        <native.lib.path>${env.NATIVE_LIB_PATH}</native.lib.path>
+
+        <!-- Native library configuration -->
+        <llama.lib.path>${env.LLAMA_LIB_PATH}</llama.lib.path>
+        <llama.test.model>${env.LLAMA_TEST_MODEL_RESOURCE}</llama.test.model>
+
+        <!-- Skip integration tests by default -->
+        <skipITs>true</skipITs>
     </properties>
 
     <dependencies>
@@ -67,12 +73,18 @@
                 <version>3.5.2</version>
                 <configuration>
                     <argLine>--enable-native-access=ALL-UNNAMED</argLine>
+                    <skipITs>${skipITs}</skipITs>
+                    <forkCount>1</forkCount>
+                    <reuseForks>false</reuseForks>
                     <!-- Integration tests: require native library -->
-                    <argLine>--enable-native-access=ALL-UNNAMED</argLine>
                     <includes>
                         <include>**/*IT.java</include>
                         <include>**/*IntegrationTest.java</include>
                     </includes>
+                    <systemPropertyVariables>
+                        <llama.lib.path>${llama.lib.path}</llama.lib.path>
+                        <llama.test.model>${llama.test.model}</llama.test.model>
+                    </systemPropertyVariables>
                 </configuration>
                 <executions>
                     <execution>
@@ -85,4 +97,13 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>integration-tests</id>
+            <properties>
+                <skipITs>false</skipITs>
+            </properties>
+        </profile>
+    </profiles>
 </project>

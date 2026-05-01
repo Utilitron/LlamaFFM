@@ -1,4 +1,4 @@
-package ffm.llama.model;
+package ffm.llama.batch;
 
 import ffm.llama.IntegrationTestBase;
 import org.junit.jupiter.api.*;

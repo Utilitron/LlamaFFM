@@ -1,6 +1,6 @@
-package ffm.llama.model.state;
+package ffm.llama.context.state;
 
-import ffm.llama.model.LlamaContext;
+import ffm.llama.context.LlamaContext;
 import ffm.llama.model.LlamaModel;
 import ffm.llama.service.LlmService;
 
@@ -27,7 +27,7 @@ public class ContextStateManager {
         LlamaModel model = instance.model;
         
         try {
-            long stateSize = ctx.getStateSize();
+            long stateSize = ctx.contextStateIO().getStateSize();
             if (stateSize <= 0) {
                 System.err.println("Invalid state size: " + stateSize + " for model " + model.getPath());
                 return Optional.empty();
@@ -35,7 +35,7 @@ public class ContextStateManager {
             
             try (Arena tempArena = Arena.ofConfined()) {
                 MemorySegment stateBuffer = tempArena.allocate(stateSize);
-                long bytesWritten = ctx.saveState(stateBuffer, stateSize);
+                long bytesWritten = ctx.contextStateIO().saveState(stateBuffer, stateSize);
                 
                 if (bytesWritten != stateSize) {
                     System.err.printf("State size mismatch: expected %d, written %d for model %s%n", stateSize, bytesWritten, model.getPath());
@@ -50,7 +50,7 @@ public class ContextStateManager {
                         instance.modelConfig,
                         System.currentTimeMillis(),
                         model.getPath(),
-                        ctx.getMaxSequencePosition(0) + 1
+                        ctx.kvCache().getMaxSequencePosition(0) + 1
                 );
                 
                 System.out.printf("Snapshot created for %s: %.2f MB%n", model.getPath(), cachedState.getSizeMB());
@@ -86,7 +86,7 @@ public class ContextStateManager {
                 );
                 MemorySegment.copy(source, 0, stateBuffer, 0, stateSize);
                 
-                long bytesRead = ctx.loadState(stateBuffer, stateSize);
+                long bytesRead = ctx.contextStateIO().loadState(stateBuffer, stateSize);
                 
                 if (bytesRead != stateSize) {
                     System.err.printf("State restore size mismatch: expected %d, read %d", stateSize, bytesRead);
