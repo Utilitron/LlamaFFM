@@ -3,6 +3,7 @@ package ffm.llama.session;
 import ffm.llama.batch.BatchFactory;
 import ffm.llama.batch.DefaultBatchFactory;
 import ffm.llama.batch.LlamaBatch;
+import ffm.llama.config.ModelConfig;
 import ffm.llama.context.LlamaContext;
 import ffm.llama.exception.InferenceException;
 import ffm.llama.model.*;
@@ -226,9 +227,7 @@ public class GenerationSession implements AutoCloseable {
      */
     public CachedContextState snapshot() {
         ensureNotClosed();
-        return stateSerializer.snapshot(
-                new LlmService.ModelInstance(model, context, context.getModelConfig())
-        ).orElse(null);
+        return stateSerializer.snapshot(model, context, context.getModelConfig()).orElse(null);
     }
     
     /**
@@ -395,8 +394,8 @@ public class GenerationSession implements AutoCloseable {
      */
     private static class DefaultStateSerializer implements StateSerializer {
         @Override
-        public Optional<CachedContextState> snapshot(LlmService.ModelInstance instance) {
-            return ContextStateManager.snapshotContext(instance);
+        public Optional<CachedContextState> snapshot(LlamaModel model, LlamaContext context, ModelConfig config) {
+            return ContextStateManager.snapshotContext(model, context, config);
         }
         
         @Override

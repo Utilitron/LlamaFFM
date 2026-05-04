@@ -18,6 +18,10 @@ import java.nio.charset.Charset;
  */
 public class LlamaBindings {
     
+    // Static field to prevent GC of the native callback stub
+    private static MemorySegment LOG_STUB;
+    private static volatile boolean loggingEnabled = false;
+    
     /**
      * Layout for llama_model_params
      * Controls model loading behavior and initial offloading strategy
@@ -238,6 +242,10 @@ public class LlamaBindings {
     public static final MethodHandle llama_state_seq_set_data;
     public static final MethodHandle llama_state_seq_save_file;
     public static final MethodHandle llama_state_seq_load_file;
+    
+    // ============================================================================
+    // PERFORMANCE TELEMETRY - For monitoring offloading efficiency
+    // ============================================================================
     public static final MethodHandle llama_perf_context;
     public static final MethodHandle llama_perf_context_print;
     public static final MethodHandle llama_perf_context_reset;
@@ -245,36 +253,33 @@ public class LlamaBindings {
     public static final MethodHandle llama_perf_sampler_reset;
     
     // ============================================================================
-    // PERFORMANCE TELEMETRY - For monitoring offloading efficiency
-    // ============================================================================
-    // ============================================================================
     // CHAT TEMPLATE
     // ============================================================================
     public static final MethodHandle llama_model_chat_template;
     public static final MethodHandle llama_chat_apply_template;
-    private static final Linker linker = Linker.nativeLinker();
-    private static final SymbolLookup lookup = SymbolLookup.loaderLookup();
-    // Static field to prevent GC of the native callback stub
-    private static MemorySegment LOG_STUB;
-    private static volatile boolean loggingEnabled = false;
-    
-    static {
-        // Look for a specific environment variable, fallback to a default name
-        String llamaPath = System.getenv("LLAMA_LIB_PATH");
-        
-        if (llamaPath != null) {
-            System.load(llamaPath);
-        } else {
-            // Fallback: try to load from the system's standard library paths (LD_LIBRARY_PATH)
-            System.loadLibrary("llama");
-        }
-        
-        installLogCallback();
-    }
     
     // ============================================================================
     // INITIALIZATION - Bind all native functions
     // ============================================================================
+    
+    private static final Linker linker;
+    private static final SymbolLookup lookup;
+    
+    static {
+        try {
+            // Safe one-time native loading
+            LlamaLoader.load();
+            
+            linker = Linker.nativeLinker();
+            lookup = SymbolLookup.loaderLookup();
+            
+            // Install logger after native library is available
+            installLogCallback();
+            
+        } catch (Throwable t) {
+            throw new RuntimeException("Failed to initialize native llama bindings", t);
+        }
+    }
     
     static {
         try {
@@ -655,6 +660,7 @@ public class LlamaBindings {
      */
     public static void init() {
         try {
+            if (!LlamaLoader.isLoaded()) LlamaLoader.load();
             llama_backend_init.invoke();
         } catch (Throwable t) {
             throw new RuntimeException("Failed to initialize llama backend", t);

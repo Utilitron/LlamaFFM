@@ -68,10 +68,8 @@ class ContextStateManagerIT extends IntegrationTestBase {
         
         int posBefore = kvCache.getMaxSequencePosition(0) + 1;
         
-        // Snapshot – ContextStateManager still uses LlamaContext directly (no change needed)
-        var state = ContextStateManager.snapshotContext(
-                new LlmService.ModelInstance(model, context, config)
-        ).orElseThrow();
+        // Snapshot
+        var state = ContextStateManager.snapshotContext(model, context, config).orElseThrow();
         assertNotNull(state);
         assertEquals(posBefore, state.getNTokens());
         
