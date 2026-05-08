@@ -1,5 +1,6 @@
 package ffm.llama.context.state;
 
+import ffm.llama.config.ModelConfig;
 import ffm.llama.context.LlamaContext;
 import ffm.llama.model.LlamaModel;
 import ffm.llama.service.LlmService;
@@ -19,13 +20,12 @@ public class ContextStateManager {
      * Create a snapshot of the context's KV cache state.
      * Converts native memory to a byte array for safe storage.
      *
-     * @param instance The model instance to snapshot
+     * @param model   the loaded model
+     * @param ctx     the context to snapshot
+     * @param config  the model configuration
      * @return Optional containing the cached state, or empty if snapshot failed
      */
-    public static Optional<CachedContextState> snapshotContext(LlmService.ModelInstance instance) {
-        LlamaContext ctx = instance.context;
-        LlamaModel model = instance.model;
-        
+    public static Optional<CachedContextState> snapshotContext(LlamaModel model, LlamaContext ctx, ModelConfig config) {
         try {
             long stateSize = ctx.contextStateIO().getStateSize();
             if (stateSize <= 0) {
@@ -47,7 +47,7 @@ public class ContextStateManager {
                 
                 CachedContextState cachedState = new CachedContextState(
                         stateBytes,
-                        instance.modelConfig,
+                        config,
                         System.currentTimeMillis(),
                         model.getPath(),
                         ctx.kvCache().getMaxSequencePosition(0) + 1

@@ -3,6 +3,7 @@ package ffm.llama.service;
 import ffm.llama.binding.LlamaBindings;
 import ffm.llama.config.ModelConfig;
 import ffm.llama.enums.PoolingType;
+import ffm.llama.exception.LlmServiceTimeoutException;
 import ffm.llama.message.*;
 import ffm.llama.batch.LlamaBatch;
 import ffm.llama.context.LlamaContext;
@@ -21,7 +22,12 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 
 /**
@@ -34,11 +40,38 @@ public class LlmService implements AutoCloseable {
         LlamaBindings.init();
     }
     
-    // Model registry - maps model names to loaded instances
-    private final Map<String, ModelInstance> loadedModels = new ConcurrentHashMap<>();
+    // Model registry - maps model names to context pools
+    private final ConcurrentHashMap<String, ModelContextPool> loadedModels = new ConcurrentHashMap<>();
+    
     // Evicted state cache - stores KV cache snapshots in RAM
-    private final Map<String, CachedContextState> evictedStates = new ConcurrentHashMap<>();
-    private boolean verbose = false;
+    private final ConcurrentHashMap<String, CachedContextState> evictedStates = new ConcurrentHashMap<>();
+    
+    private final ReadWriteLock serviceLock = new ReentrantReadWriteLock();
+    private volatile int defaultPoolSize = 4;
+    private volatile long contextBorrowTimeoutMs = 30_000;
+    
+    private volatile boolean verbose = false;
+    
+    /**
+     * Set the default pool size for newly loaded models.
+     * Does not affect already loaded models.
+     *
+     * @param size Number of contexts to create per model (minimum 1)
+     */
+    public void setDefaultPoolSize(int size) {
+        if (size < 1) throw new IllegalArgumentException("Pool size must be at least 1");
+        this.defaultPoolSize = size;
+    }
+    
+    /**
+     * Set the timeout for borrowing a context from a model pool.
+     *
+     * @param timeoutMs Timeout in milliseconds (0 = wait indefinitely)
+     */
+    public void setContextBorrowTimeout(long timeoutMs) {
+        if (timeoutMs < 0) throw new IllegalArgumentException("Timeout must be non‑negative");
+        this.contextBorrowTimeoutMs = timeoutMs;
+    }
     
     /**
      * Load a model with default configuration
@@ -51,25 +84,42 @@ public class LlmService implements AutoCloseable {
     }
     
     /**
-     * Load a model with explicit model configuration
-     * Attempts to restore KV cache from evicted state if available and compatible.
+     * Load a model with explicit model configuration and default pool size
      *
      * @param modelPath   Path to .gguf model file
      * @param modelConfig Model configuration (null = default settings)
      * @return Model identifier for subsequent calls
      */
     public String loadModel(String modelPath, ModelConfig modelConfig) {
+        return loadModel(modelPath, modelConfig, defaultPoolSize);
+    }
+    
+    /**
+     * Load a model with explicit model configuration and pool size.
+     * Attempts to restore KV cache from evicted state if available and compatible.
+     * <p>
+     * Thread safety: acquires the service write lock; concurrent calls are
+     * serialised.  Inference on other models may still proceed.
+     *
+     * @param modelPath   Path to .gguf model file
+     * @param modelConfig Model configuration (null = default settings)
+     * @param poolSize    Number of concurrent contexts (minimum 1)
+     * @return Model identifier for subsequent calls
+     */
+    public String loadModel(String modelPath, ModelConfig modelConfig, int poolSize) {
+        if (poolSize < 1)
+            throw new IllegalArgumentException("Pool size must be at least 1");
+        
         String modelName = Paths.get(modelPath).getFileName().toString();
         
-        // Check if already loaded
-        if (loadedModels.containsKey(modelName)) {
-            if (verbose) {
-                System.out.println("Model already loaded: " + modelName);
-            }
-            return modelName;
-        }
-        
+        serviceLock.writeLock().lock();
         try {
+            // Check if already loaded
+            if (loadedModels.containsKey(modelName)) {
+                if (verbose) System.out.println("Model already loaded: " + modelName);
+                return modelName;
+            }
+            
             // Load model
             LlamaModel model = new LlamaModel(modelPath, modelConfig);
             
@@ -87,20 +137,25 @@ public class LlmService implements AutoCloseable {
                         .build();
             }
             
-            // Create context
-            LlamaContext context = new LlamaContext(model, finalConfig);
+            // Create context pool and register immediately
+            ModelContextPool pool = new ModelContextPool(model, finalConfig, poolSize);
+            loadedModels.put(modelName, pool);
+            
+            // Obtain first context for state restore / info (safe – pool is pre‑filled)
+            LlamaContext firstCtx = pool.availableContexts.peek();
             
             // Check for cached state and restore if compatible
             CachedContextState cachedState = evictedStates.get(modelPath);
             boolean restored = false;
             
-            if (cachedState != null) {
+            if (cachedState != null && firstCtx != null) {
                 if (cachedState.isCompatibleWith(modelPath, finalConfig)) {
                     // Attempt to restore cached KV cache
-                    restored = ContextStateManager.restoreContext(context, cachedState);
+                    restored = ContextStateManager.restoreContext(firstCtx, cachedState);
                     
                     if (restored) {
-                        System.out.printf("Restored KV cache for %s (%.2f MB, saved %d ms ago)%n", modelName, cachedState.getSizeMB(), cachedState.getAgeMs());
+                        System.out.printf("Restored KV cache for %s (%.2f MB, saved %d ms ago)%n",
+                                modelName, cachedState.getSizeMB(), cachedState.getAgeMs());
                         
                         // Remove from cache after successful restore
                         evictedStates.remove(modelPath);
@@ -110,27 +165,27 @@ public class LlmService implements AutoCloseable {
                         evictedStates.remove(modelPath);
                     }
                 } else {
-                    System.out.println("Cached state for " + modelName + " is incompatible with current config, discarding");
+                    if (verbose) System.out.println(
+                            "Cached state for " + modelName + " is incompatible with current config, discarding");
                     evictedStates.remove(modelPath);
                 }
             }
-            
-            // Register instance
-            ModelInstance instance = new ModelInstance(model, context, finalConfig);
-            instance.restoredFromCache = restored;
-            loadedModels.put(modelName, instance);
             
             System.out.println("Loaded model: " + modelName);
             if (verbose) {
                 System.out.println("Loaded model: " + modelName + (restored ? " [KV cache restored]" : ""));
                 model.printInfo();
-                context.printInfo();
+                if (firstCtx != null) {
+                    firstCtx.printInfo();
+                }
             }
             
             return modelName;
             
         } catch (Exception e) {
             throw new RuntimeException("Failed to load model: " + modelName, e);
+        } finally {
+            serviceLock.writeLock().unlock();
         }
     }
     
@@ -143,10 +198,22 @@ public class LlmService implements AutoCloseable {
     public void unloadModel(String modelPath) {
         String modelName = Paths.get(modelPath).getFileName().toString();
         
-        ModelInstance instance = loadedModels.remove(modelName);
-        if (instance != null) {
-            instance.close();
-            System.out.println("Unloaded model: " + modelName);
+        serviceLock.writeLock().lock();
+        try {
+            ModelContextPool pool = loadedModels.remove(modelName);
+            if (pool != null) {
+                // Wait for all contexts to be returned
+                while (pool.getAvailableCount() < pool.getPoolSize()) {
+                    try { Thread.sleep(100); } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt(); break;
+                    }
+                }
+                pool.close();
+                pool.model.close();
+                System.out.println("Unloaded model: " + modelName);
+            }
+        } finally {
+            serviceLock.writeLock().unlock();
         }
     }
     
@@ -268,22 +335,42 @@ public class LlmService implements AutoCloseable {
             LlamaSampler.SamplerConfig samplerConfig,
             Consumer<String> callback
     ) {
-        ModelInstance instance = loadedModels.get(modelName);
-        if (instance == null) {
-            throw new IllegalArgumentException("Model not loaded: " + modelName);
+        serviceLock.readLock().lock();
+        try {
+            ModelContextPool pool = loadedModels.get(modelName);
+            if (pool == null)
+                throw new IllegalArgumentException("Model not loaded: " + modelName);
+
+            LlamaContext ctx = null;
+            try {
+                ctx = pool.borrowContext(contextBorrowTimeoutMs);
+                performGeneration(pool.model, ctx, pool.modelConfig, conversation, samplerConfig, callback);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for context", e);
+            } finally {
+                if (ctx != null) pool.returnContext(ctx);
+            }
+        } finally {
+            serviceLock.readLock().unlock();
         }
-        
-        instance.updateLastUsed();
-        LlamaModel model = instance.model;
-        LlamaContext ctx = instance.context;
-        
+    }
+
+    private void performGeneration(
+            LlamaModel model,
+            LlamaContext ctx,
+            ModelConfig config,
+            List<? extends LlmMessage> conversation,
+            LlamaSampler.SamplerConfig samplerConfig,
+            Consumer<String> callback
+    ) {
         String formattedPrompt = applyChatTemplate(model.getChatTemplate(), conversation, true);
         
         // Tokenize prompt
         int[] promptTokens = model.tokenize(formattedPrompt, true, true);
         
         // Get context size from model config
-        int contextSize = ctx.getModelConfig().getContextSize();
+        int contextSize = config.getContextSize();
         
         // Context overflow - prevents native crashes and undefined behavior
         if (promptTokens.length > contextSize) {
@@ -306,7 +393,7 @@ public class LlmService implements AutoCloseable {
             
             if (verbose) System.out.println(session.getMetrics().summary());
         } catch (Exception e) {
-            throw new RuntimeException("Generation failed for model: " + modelName, e);
+            throw new RuntimeException("Generation failed for model: " + model.getPath(), e);
         }
     }
     
@@ -334,20 +421,32 @@ public class LlmService implements AutoCloseable {
      * @return Embedding vector as float array
      */
     public float[] embed(String modelName, String text, boolean truncate) {
-        ModelInstance instance = loadedModels.get(modelName);
-        if (instance == null) {
-            throw new IllegalArgumentException("Model not loaded: " + modelName);
+        serviceLock.readLock().lock();
+        try {
+            ModelContextPool pool = loadedModels.get(modelName);
+            if (pool == null)
+                throw new IllegalArgumentException("Model not loaded: " + modelName);
+            
+            // Validate that model is configured for embeddings
+            if (!pool.modelConfig.isEmbeddings())
+                throw new IllegalStateException("Model not configured for embeddings.");
+
+            LlamaContext ctx = null;
+            try {
+                ctx = pool.borrowContext(contextBorrowTimeoutMs);
+                return performEmbedding(pool.model, ctx, pool.modelConfig, text, truncate);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for context", e);
+            } finally {
+                if (ctx != null) pool.returnContext(ctx);
+            }
+        } finally {
+            serviceLock.readLock().unlock();
         }
-        
-        // Validate that model is configured for embeddings
-        if (!instance.modelConfig.isEmbeddings()) {
-            throw new IllegalStateException("Model not configured for embeddings.");
-        }
-        
-        instance.updateLastUsed();
-        LlamaModel model = instance.model;
-        LlamaContext ctx = instance.context;
-        
+    }
+
+    private float[] performEmbedding(LlamaModel model, LlamaContext ctx, ModelConfig config, String text, boolean truncate) {
         try {
             // Get the embedding size
             int n_embd = (int) LlamaBindings.llama_model_n_embd.invokeExact(model.ptr());
@@ -357,7 +456,7 @@ public class LlmService implements AutoCloseable {
             boolean isNone = poolingType == PoolingType.NONE.getValue();
             
             // Hard limit = batch size
-            int maxTokens = ctx.getModelConfig().getBatchSize();
+            int maxTokens = config.getBatchSize();
             int[] tokens = model.tokenize(text, true, false);
             
             // Enforce limit
@@ -365,9 +464,7 @@ public class LlmService implements AutoCloseable {
                 if (truncate) {
                     // Truncate to maxTokens – keep the first maxTokens tokens
                     tokens = Arrays.copyOf(tokens, maxTokens);
-                    if (verbose) {
-                        System.out.printf("[LlmService] Embedding truncated from %d to %d tokens%n", tokens.length, maxTokens);
-                    }
+                    if (verbose) System.out.printf("[LlmService] Embedding truncated from %d to %d tokens%n", tokens.length, maxTokens);
                 } else {
                     throw new IllegalStateException(String.format("Text length %d tokens exceeds maximum %d. Use truncate=true or split the input.", tokens.length, maxTokens));
                 }
@@ -379,10 +476,7 @@ public class LlmService implements AutoCloseable {
             // Process batch - enable logits for last token
             try (LlamaBatch batch = LlamaBatch.forTokens(tokens, 0, 0, !isNone)) {
                 int ret = ctx.decoder().decode(batch);
-                if (ret != 0) {
-                    throw new RuntimeException("Failed to decode batch (error code: " + ret + ")");
-                }
-            }
+                if (ret != 0) throw new RuntimeException("Failed to decode batch (error code: " + ret + ")");            }
             
             // Retrieve computed embeddings
             if (poolingType == PoolingType.NONE.getValue()) {
@@ -394,9 +488,9 @@ public class LlmService implements AutoCloseable {
             } else {
                 // Access the pooled sequence-level embedding buffer
                 MemorySegment seqEmbed = (MemorySegment) LlamaBindings.llama_get_embeddings_seq.invokeExact(ctx.ptr(), 0);
-                if (seqEmbed.address() == 0L) {
-                    throw new RuntimeException("Model pooling failed to produce a sequence embedding.");
-                }
+
+                if (seqEmbed.address() == 0L) throw new RuntimeException("Model pooling failed to produce a sequence embedding.");
+
                 return copyEmbedding(seqEmbed, n_embd);
             }
             
@@ -418,34 +512,48 @@ public class LlmService implements AutoCloseable {
     }
     
     /**
-     * Get information about a loaded model
+     * Get information about a loaded model.
+     *
+     * @param modelName Model identifier
+     * @return Model information, or {@code null} if not loaded
      */
     public ModelInfo getModelInfo(String modelName) {
-        ModelInstance instance = loadedModels.get(modelName);
-        if (instance == null) {
-            return null;
+        serviceLock.readLock().lock();
+        try {
+            ModelContextPool pool = loadedModels.get(modelName);
+            if (pool == null) return null;
+            LlamaModel model = pool.model;
+            return new ModelInfo(
+                    modelName,
+                    TemplateDetector.getTemplateName(model.getChatTemplate()),
+                    model.getParameterCount(),
+                    model.getModelSizeGB(),
+                    model.getLayerCount(),
+                    model.getEmbeddingSize(),
+                    pool.modelConfig,
+                    pool.lastUsedMs,
+                    pool.getPoolSize(),
+                    pool.getAvailableCount()
+            );
+        } finally {
+            serviceLock.readLock().unlock();
         }
-        
-        LlamaModel model = instance.model;
-        return new ModelInfo(
-                modelName,
-                TemplateDetector.getTemplateName(model.getChatTemplate()),
-                model.getParameterCount(),
-                model.getModelSizeGB(),
-                model.getLayerCount(),
-                model.getEmbeddingSize(),
-                instance.modelConfig,
-                instance.lastUsedMs
-        );
     }
     
     /**
-     * Get all loaded models
+     * Get all loaded models.
+     * @return list of model info records
      */
     public List<ModelInfo> getLoadedModels() {
-        return loadedModels.values().stream()
-                .map(inst -> getModelInfo(Paths.get(inst.model.getPath()).getFileName().toString()))
-                .toList();
+        serviceLock.readLock().lock();
+        try {
+            return loadedModels.keySet().stream()
+                    .map(this::getModelInfo)
+                    .filter(Objects::nonNull)
+                    .toList();
+        } finally {
+            serviceLock.readLock().unlock();
+        }
     }
     
     /**
@@ -455,23 +563,29 @@ public class LlmService implements AutoCloseable {
      * @return true if evicted, false if not loaded
      */
     public boolean evictModel(String modelName) {
-        ModelInstance instance = loadedModels.get(modelName);
-        if (instance == null) return false;
-        
-        String modelPath = instance.model.getPath();
-        
-        ContextStateManager.snapshotContext(instance).ifPresentOrElse(state -> {
-                    evictedStates.put(modelPath, state);
-                    if (verbose)
-                        System.out.printf("[LlmService] KV snapshot saved for %s (%.2f MB)%n", modelName, state.getSizeMB());
-                }, () -> System.err.println("[LlmService] Failed to snapshot " + modelName)
-        );
-        
-        loadedModels.remove(modelName);
-        instance.close();
-        
-        if (verbose) System.out.println("Evicted model: " + modelName);
-        return true;
+        serviceLock.writeLock().lock();
+        try {
+            ModelContextPool pool = loadedModels.get(modelName);
+            if (pool == null) return false;
+
+            String modelPath = pool.model.getPath();
+            LlamaContext firstCtx = pool.availableContexts.peek();
+            if (firstCtx != null) {
+                ContextStateManager.snapshotContext(pool.model, firstCtx, pool.modelConfig)
+                    .ifPresentOrElse(state -> {
+                            evictedStates.put(modelPath, state);
+                            if (verbose) System.out.printf("[LlmService] KV snapshot saved for %s (%.2f MB)%n", modelName, state.getSizeMB());
+                        },
+                        () -> System.err.println("[LlmService] Failed to snapshot " + modelName)
+                    );
+            }
+
+            unloadModel(modelPath);
+            if (verbose) System.out.println("Evicted model: " + modelName);
+            return true;
+        } finally {
+            serviceLock.writeLock().unlock();
+        }
     }
     
     /**
@@ -480,45 +594,43 @@ public class LlmService implements AutoCloseable {
      * @return true if a model was evicted, false if no models loaded
      */
     public boolean evictLRU() {
-        if (loadedModels.isEmpty()) return false;
-        
-        // Find LRU model
-        Map.Entry<String, ModelInstance> lruEntry = loadedModels.entrySet().stream()
-                .min(Comparator.comparingLong(e -> e.getValue().lastUsedMs))
-                .orElse(null);
-        
-        if (lruEntry == null) return false;
-        
-        String modelName = lruEntry.getKey();
-        
-        return evictModel(modelName);
+        serviceLock.writeLock().lock();
+        try {
+            // Find LRU model
+            if (loadedModels.isEmpty()) return false;
+            Map.Entry<String, ModelContextPool> lruEntry = loadedModels.entrySet().stream()
+                    .min(Comparator.comparingLong(e -> e.getValue().lastUsedMs))
+                    .orElse(null);
+            return lruEntry != null && evictModel(lruEntry.getKey());
+        } finally {
+            serviceLock.writeLock().unlock();
+        }
     }
     
     /**
      * Get information about cached states
+     *
+     * @return a copy of the evicted state map
      */
     public Map<String, CachedContextState> getEvictedStates() {
         return new HashMap<>(evictedStates);
     }
     
     /**
-     * Manually clear all cached states to free RAM
+     * Clear all cached states to free RAM
      */
     public void clearEvictedStates() {
         int count = evictedStates.size();
         evictedStates.clear();
         
-        if (verbose) {
-            System.out.printf("Cleared " + count + " cached states");
-        }
+        if (verbose) System.out.printf("Cleared %d cached states%n", count);
     }
     
     /**
-     * Manually clear a specific cached state
+     * Clear a specific cached state
      */
     public boolean clearEvictedState(String modelPath) {
-        CachedContextState removed = evictedStates.remove(modelPath);
-        return removed != null;
+        return evictedStates.remove(modelPath) != null;
     }
     
     /**
@@ -530,100 +642,132 @@ public class LlmService implements AutoCloseable {
                 .sum();
     }
     
-    public boolean isVerbose() {
-        return verbose;
-    }
+    public boolean isVerbose() { return verbose; }
     
     /**
      * Enable or disable verbose console output
      */
-    public void setVerbose(boolean verbose) {
-        this.verbose = verbose;
-    }
-    
+    public void setVerbose(boolean verbose) { this.verbose = verbose; }
+
     /**
      * Get all loaded models
+     *
+     * @return set of loaded model names
      */
     public Set<String> getLoadedModelNames() {
-        return new HashSet<>(loadedModels.keySet());
+        serviceLock.readLock().lock();
+        try {
+            return new HashSet<>(loadedModels.keySet());
+        } finally {
+            serviceLock.readLock().unlock();
+        }
     }
     
     /**
      * Print service status including cached states
      */
     public void printStatus() {
-        System.out.println("=".repeat(60));
-        System.out.println("LLM Service Status (Enhanced with KV Cache Persistence)");
-        System.out.println("=".repeat(60));
-        System.out.println("Loaded Models:       " + loadedModels.size());
-        System.out.println("Cached States:       " + evictedStates.size());
-        System.out.println("Cached State Memory: " + String.format("%.2f MB", getTotalCachedStateSizeMB()));
-        System.out.println("-".repeat(60));
-        
-        // Show loaded models
-        for (Map.Entry<String, ModelInstance> entry : loadedModels.entrySet()) {
-            ModelInstance inst = entry.getValue();
-            System.out.printf("  [LOADED] %s %s(age: %d ms)%n",
-                    entry.getKey(), inst.restoredFromCache ? "[RESTORED] " : "", System.currentTimeMillis() - inst.lastUsedMs
-            );
+        serviceLock.readLock().lock();
+        try {
+            System.out.println("=".repeat(60));
+            System.out.println("LLM Service Status (Enhanced with Context Pooling)");
+            System.out.println("=".repeat(60));
+            System.out.println("Loaded Models:       " + loadedModels.size());
+            System.out.println("Cached States:       " + evictedStates.size());
+            System.out.println("Cached State Memory: " + String.format("%.2f MB", getTotalCachedStateSizeMB()));
+            System.out.println("-".repeat(60));
+            for (var entry : loadedModels.entrySet()) {
+                ModelContextPool p = entry.getValue();
+                System.out.printf("  [LOADED] %s (pool %d/%d available, age: %d ms)%n",
+                        entry.getKey(), p.getAvailableCount(), p.getPoolSize(),
+                        System.currentTimeMillis() - p.lastUsedMs);
+            }
+            for (var entry : evictedStates.entrySet()) {
+                CachedContextState state = entry.getValue();
+                System.out.printf("  [CACHED] %s (%.2f MB, age: %d ms)%n",
+                        Paths.get(entry.getKey()).getFileName(), state.getSizeMB(), state.getAgeMs());
+            }
+            System.out.println("=".repeat(60));
+        } finally {
+            serviceLock.readLock().unlock();
         }
-        
-        // Show cached states
-        for (Map.Entry<String, CachedContextState> entry : evictedStates.entrySet()) {
-            CachedContextState state = entry.getValue();
-            System.out.printf("  [CACHED] %s (%.2f MB, age: %d ms)%n",
-                    Paths.get(entry.getKey()).getFileName(), state.getSizeMB(), state.getAgeMs()
-            );
-        }
-        
-        System.out.println("=".repeat(60));
     }
-    
+
+    /**
+     * Close the service and free all resources.
+     * Blocks until all in‑flight operations have completed.
+     */
     @Override
     public void close() {
-        // Unload all models
-        new ArrayList<>(loadedModels.keySet()).forEach(name -> {
-            ModelInstance inst = loadedModels.remove(name);
-            if (inst != null) {
-                inst.close();
-            }
-        });
-        
-        // Clear cached states
-        evictedStates.clear();
-        
-        // Free backend
-        LlamaBindings.free();
+        serviceLock.writeLock().lock();
+        try {
+            new ArrayList<>(loadedModels.keySet()).forEach(name -> {
+                ModelContextPool pool = loadedModels.remove(name);
+                if (pool != null) {
+                    pool.close();
+                    pool.model.close();
+                }
+            });
+            // Clear cached states
+            evictedStates.clear();
+            
+            // Free backend
+            LlamaBindings.free();
+        } finally {
+            serviceLock.writeLock().unlock();
+        }
     }
     
     /**
-     * Model instance wrapper
+     * Model context pool
      */
-    public static class ModelInstance {
-        public final LlamaModel model;
-        public final LlamaContext context;
-        public final ModelConfig modelConfig;
-        long lastUsedMs;
+    private static class ModelContextPool {
+        final LlamaModel model;
+        final ModelConfig modelConfig;
+        final BlockingQueue<LlamaContext> availableContexts;
+        final Set<LlamaContext> allContexts;
+        volatile long lastUsedMs;
+        volatile boolean closed = false;
         
-        // Track if this instance was restored from a cached state
-        boolean restoredFromCache;
-        
-        public ModelInstance(LlamaModel model, LlamaContext context, ModelConfig modelConfig) {
+        ModelContextPool(LlamaModel model, ModelConfig config, int poolSize) {
             this.model = model;
-            this.context = context;
-            this.modelConfig = modelConfig;
+            this.modelConfig = config;
+            this.availableContexts = new LinkedBlockingQueue<>(poolSize);
+            this.allContexts = ConcurrentHashMap.newKeySet();
             this.lastUsedMs = System.currentTimeMillis();
-            this.restoredFromCache = false;
+            for (int i = 0; i < poolSize; i++) {
+                LlamaContext ctx = new LlamaContext(model, config);
+                availableContexts.offer(ctx);
+                allContexts.add(ctx);
+            }
         }
         
-        void updateLastUsed() {
-            this.lastUsedMs = System.currentTimeMillis();
+        LlamaContext borrowContext(long timeoutMs) throws InterruptedException {
+            if (closed)
+                throw new IllegalStateException("Model context pool is closed");
+            LlamaContext ctx = timeoutMs > 0
+                    ? availableContexts.poll(timeoutMs, TimeUnit.MILLISECONDS)
+                    : availableContexts.take();
+            if (ctx == null)
+                throw new LlmServiceTimeoutException("Context pool exhausted for model");
+            lastUsedMs = System.currentTimeMillis();
+            return ctx;
+        }
+        
+        void returnContext(LlamaContext ctx) {
+            if (!closed && allContexts.contains(ctx))
+                availableContexts.offer(ctx);
         }
         
         void close() {
-            context.close();
-            model.close();
+            closed = true;
+            for (LlamaContext ctx : allContexts) ctx.close();
+            availableContexts.clear();
+            allContexts.clear();
         }
+        
+        int getPoolSize() { return allContexts.size(); }
+        int getAvailableCount() { return availableContexts.size(); }
     }
     
     /**
@@ -637,13 +781,16 @@ public class LlmService implements AutoCloseable {
             int layerCount,
             int embeddingSize,
             ModelConfig modelConfig,
-            long lastUsedMs
+            long lastUsedMs,
+            int poolSize,
+            int availableContexts
     ) {
         @Override
         public String toString() {
             long ageMs = System.currentTimeMillis() - lastUsedMs;
-            return String.format("Model[%.1fB params, %.2f GB, layers=%d, embd=%d, age=%ds]",
-                    paramCount / 1_000_000_000.0, sizeGB, layerCount, embeddingSize, ageMs / 1000);
+            return String.format("Model[%.1fB params, %.2f GB, layers=%d, embd=%d, pool=%d/%d, age=%ds]",
+                    paramCount / 1_000_000_000.0, sizeGB, layerCount, embeddingSize,
+                    availableContexts, poolSize, ageMs / 1000);
         }
     }
 }

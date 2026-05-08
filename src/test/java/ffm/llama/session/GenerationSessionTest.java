@@ -145,7 +145,7 @@ class GenerationSessionTest {
         @DisplayName("Should delegate to stateSerializer and return result")
         void shouldDelegateToStateSerializer() {
             CachedContextState dummyState = mock(CachedContextState.class);
-            when(stateSerializer.snapshot(any())).thenReturn(Optional.of(dummyState));
+            when(stateSerializer.snapshot(any(LlamaModel.class), any(LlamaContext.class), any(ModelConfig.class))).thenReturn(Optional.of(dummyState));
 
             GenerationSession session = baseBuilder.build();
             CachedContextState result = session.snapshot();
